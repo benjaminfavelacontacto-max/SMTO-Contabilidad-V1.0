@@ -89,9 +89,11 @@ function processFile(file) {
       }
 
       if (rows.length === 0) {
+        const sheets = wb.SheetNames.join(', ');
         throw new Error(
-          `No se encontraron transacciones para el año ${detectedYear}. ` +
-          'Verifica el archivo o los encabezados.'
+          `No se encontraron transacciones válidas. ` +
+          `Hojas encontradas: [${sheets}]. ` +
+          'Verifica que el archivo tenga hojas "INGRESOS" y "EGRESOS" con datos.'
         );
       }
 
@@ -107,124 +109,124 @@ function processFile(file) {
 }
 
 // ══════════════════════════════════════════════════════
-// 3A. PARSER MULTI-HOJA (formato SMTO)
-//     INGRESOS: RFC(0) NOMBRE(1) TIPO(2) FACTURA(3)
-//               IMPORTE(4) IVA(5) TOTAL(6) FECHA_PAGO(7)
-//     EGRESOS:  RFC(0) PROVEEDOR(1) TIPO(2) POLIZA(3)
-//               FACTURA(4) FECHA_FAC(5) CONCEPTO(6)
-//               IMPORTE(7) IVA(8) RET(9) TOTAL(10)
+// 3A. PARSER MULTI-HOJA — ACCESO DIRECTO A CELDAS
+//     Más robusto que sheet_to_json: lee ws['A1'], ws['B2']...
+//     sin depender de opciones de parseo de SheetJS.
 // ══════════════════════════════════════════════════════
 
-function findSheetName(wb, keyword) {
-  const names = wb.SheetNames;
-  const kw    = keyword.toUpperCase();
-  // 1) Coincidencia exacta (ej: 'INGRESOS' === 'INGRESOS')
-  const exact = names.find(n => n.trim().toUpperCase() === kw || n.trim().toUpperCase() === kw + 'S');
-  if (exact) return exact;
-  // 2) Nombre más corto que contiene la palabra (evita pivot tables largas)
-  const partials = names.filter(n => n.trim().toUpperCase().includes(kw));
-  if (partials.length === 0) return null;
-  return partials.sort((a,b) => a.length - b.length)[0];
+/** Obtiene el valor crudo de una celda (o null si no existe) */
+function cellVal(ws, r, c) {
+  const cell = ws[XLSX.utils.encode_cell({ r, c })];
+  if (!cell || cell.v == null) return null;
+  // Para celdas de fecha con cellDates:true → cell.v es Date
+  // Para celdas de fecha sin cellDates → cell.v es número serial
+  // Para texto/números → cell.v es string/number
+  return cell.v;
 }
 
-function parseMultiSheet(wb) {
-  // Preferir hojas con nombre exacto 'INGRESOS' / 'EGRESOS'
-  // Si no existen, tomar la que más se parezca (nombre más corto)
-  const nameIng = findSheetName(wb, 'INGRESO');
-  const nameEgr = findSheetName(wb, 'EGRESO');
-
-  if (!nameIng || !nameEgr) {
-    throw new Error('No se encontraron hojas de INGRESOS y EGRESOS en el archivo.');
-  }
-
-  const rowsIng = parseSheetIngresos(wb.Sheets[nameIng]);
-  const rowsEgr = parseSheetEgresos(wb.Sheets[nameEgr]);
-  const combined = [...rowsIng, ...rowsEgr];
-
-  if (combined.length === 0) return [];
-
-  // Auto-detectar año más frecuente en los datos
-  const yearCount = {};
-  for (const r of combined) {
-    yearCount[r.year] = (yearCount[r.year] || 0) + 1;
-  }
-  detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
-
-  return combined.filter(r => r.year === detectedYear);
+/** Obtiene el valor formateado (cell.w) como fallback para fechas en string */
+function cellText(ws, r, c) {
+  const cell = ws[XLSX.utils.encode_cell({ r, c })];
+  if (!cell) return null;
+  return cell.w || (cell.v != null ? String(cell.v) : null);
 }
 
 /**
- * Encuentra el índice de la fila de encabezados buscando una keyword.
- * Retorna el índice 0-based dentro del array raw, o -1 si no se encuentra.
+ * Escanea las primeras N filas de un worksheet buscando la fila de encabezados.
+ * Devuelve: { headerR, cols } donde cols es un Map(nombreUpper → colIndex)
  */
-function findHeaderRow(rawArrays, keywords, maxScan = 20) {
-  for (let i = 0; i < Math.min(rawArrays.length, maxScan); i++) {
-    const row = rawArrays[i];
-    if (!row) continue;
-    const rowStr = row.map(c => c != null ? String(c).toUpperCase() : '').join('|');
-    if (keywords.some(kw => rowStr.includes(kw.toUpperCase()))) return i;
+function scanHeaders(ws, dateKeywords, maxScan) {
+  if (!ws || !ws['!ref']) return null;
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  maxScan = Math.min(maxScan || 25, range.e.r + 1);
+
+  for (let R = range.s.r; R < range.s.r + maxScan; R++) {
+    const cols = new Map();
+    let hasDate = false;
+
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const v = cellVal(ws, R, C);
+      if (v == null) continue;
+      const key = String(v).toUpperCase().trim();
+      if (key === '') continue;
+      cols.set(key, C);
+      if (dateKeywords.some(d => key.includes(d.toUpperCase()))) hasDate = true;
+    }
+
+    if (hasDate && cols.size >= 3) {
+      return { headerR: R, cols, range };
+    }
+  }
+  return null;
+}
+
+/**
+ * Busca el índice de columna dado un array de hints (exact → partial).
+ */
+function colIndex(cols, hints) {
+  // Búsqueda exacta primero
+  for (const h of hints) {
+    const k = h.toUpperCase().trim();
+    if (cols.has(k)) return cols.get(k);
+  }
+  // Búsqueda parcial (la key del mapa contiene el hint)
+  for (const h of hints) {
+    const k = h.toUpperCase().trim();
+    for (const [key, idx] of cols) {
+      if (key.includes(k)) return idx;
+    }
   }
   return -1;
 }
 
 /**
- * Busca una clave en un objeto (insensible a mayúsculas, espacios y tildes).
+ * Parser genérico por acceso directo a celdas.
+ * @param {object} ws         - Worksheet de SheetJS
+ * @param {string} tipoReg    - 'Ingreso' | 'Egreso'
+ * @param {string[]} dateH    - Hints para columna fecha
+ * @param {string[]} totalH   - Hints para columna monto
+ * @param {string[]} tipoH    - Hints para columna tipo
+ * @param {string[]} nameH    - Hints para columna nombre/proveedor
  */
-function findKey(obj, hints) {
-  const keys = Object.keys(obj);
-  for (const hint of hints) {
-    const h = hint.toUpperCase().trim();
-    const k = keys.find(k => k.toUpperCase().trim() === h);
-    if (k) return k;
-  }
-  // fallback: partial match
-  for (const hint of hints) {
-    const h = hint.toUpperCase().trim();
-    const k = keys.find(k => k.toUpperCase().trim().includes(h));
-    if (k) return k;
-  }
-  return null;
-}
+function parseSheetDirect(ws, tipoReg, dateH, totalH, tipoH, nameH) {
+  const found = scanHeaders(ws, dateH);
+  if (!found) return [];
 
-function parseSheetIngresos(ws) {
-  // Paso 1: Obtener arrays crudos para localizar el encabezado
-  const rawArrays = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const headerIdx = findHeaderRow(rawArrays, ['NOMBRE DEL CLIENTE', 'RFC CLIENTE', 'FECHA DE PAGO']);
-  if (headerIdx === -1) return [];
+  const { headerR, cols, range } = found;
+  const cFecha  = colIndex(cols, dateH);
+  const cTotal  = colIndex(cols, totalH);
+  const cTipo   = colIndex(cols, tipoH);
+  const cNombre = colIndex(cols, nameH);
 
-  // Paso 2: Releer desde la fila de encabezado usando nombres de columna
-  const objects = XLSX.utils.sheet_to_json(ws, { range: headerIdx, defval: null });
+  if (cFecha === -1 || cTotal === -1) return [];
 
   const rows = [];
-  for (const obj of objects) {
-    // Saltar filas completamente vacías
-    if (Object.values(obj).every(v => v == null || v === '')) continue;
 
-    // ── Fecha ──
-    const fechaKey = findKey(obj, ['FECHA DE PAGO', 'FECHA PAGO', 'FECHA']);
-    if (!fechaKey) continue;
-    const fecha = parseDate(obj[fechaKey]);
+  for (let R = headerR + 1; R <= range.e.r; R++) {
+    const rawFecha = cellVal(ws, R, cFecha);
+    const rawTotal = cellVal(ws, R, cTotal);
+
+    // Fila vacía
+    if (rawFecha == null && rawTotal == null) continue;
+
+    // Parsear fecha — también intenta el texto formateado de la celda
+    let fecha = parseDate(rawFecha);
+    if (!fecha) fecha = parseDate(cellText(ws, R, cFecha));
     if (!fecha) continue;
 
-    // ── Monto ──
-    const montoKey = findKey(obj, ['TOTAL', 'IMPORTE DEL CHEQUE O TRANSFERENCIA ELECTRONICA', 'IMPORTE']);
-    if (!montoKey) continue;
-    const total = parseMonto(obj[montoKey]);
+    const total = parseMonto(rawTotal);
     if (isNaN(total) || total === 0) continue;
 
-    // ── Tipo ──
-    const tipoKey = findKey(obj, ['TIPO']);
-    const tipo = (tipoKey && obj[tipoKey]) ? String(obj[tipoKey]).trim() : 'Sin tipo';
-
-    // ── Cliente ──
-    const nombreKey = findKey(obj, ['NOMBRE DEL CLIENTE', 'NOMBRE CLIENTE', 'NOMBRE']);
-    const nombre = (nombreKey && obj[nombreKey]) ? String(obj[nombreKey]).trim() : '—';
+    const rawTipo   = cTipo   >= 0 ? cellVal(ws, R, cTipo)   : null;
+    const rawNombre = cNombre >= 0 ? cellVal(ws, R, cNombre) : null;
+    const tipo   = rawTipo   != null ? String(rawTipo).trim()   : 'Sin tipo';
+    const nombre = rawNombre != null ? String(rawNombre).trim() : '—';
 
     rows.push({
       fecha,
       year:          fecha.getFullYear(),
       mes:           fecha.getMonth(),
-      tipo_registro: 'Ingreso',
+      tipo_registro: tipoReg,
       tipo,
       categoria:     tipo,
       subcategoria:  nombre,
@@ -234,51 +236,55 @@ function parseSheetIngresos(ws) {
   return rows;
 }
 
-function parseSheetEgresos(ws) {
-  // Paso 1: Localizar encabezado
-  const rawArrays = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const headerIdx = findHeaderRow(rawArrays, ['PROVEEDOR', 'RFC PROVEEDOR', 'FECHA FAC']);
-  if (headerIdx === -1) return [];
+/** Elige la hoja correcta: primero coincidencia exacta, luego la más corta */
+function findSheetName(wb, keyword) {
+  const kw = keyword.toUpperCase();
+  // Exacta (INGRESOS, EGRESOS)
+  const exact = wb.SheetNames.find(n => {
+    const u = n.trim().toUpperCase();
+    return u === kw || u === kw + 'S';
+  });
+  if (exact) return exact;
+  // Más corta que contiene la palabra
+  const partials = wb.SheetNames.filter(n => n.trim().toUpperCase().includes(kw));
+  return partials.length ? partials.sort((a,b) => a.length - b.length)[0] : null;
+}
 
-  // Paso 2: Releer con nombres de columna desde el encabezado
-  const objects = XLSX.utils.sheet_to_json(ws, { range: headerIdx, defval: null });
+function parseMultiSheet(wb) {
+  const nameIng = findSheetName(wb, 'INGRESO');
+  const nameEgr = findSheetName(wb, 'EGRESO');
+  if (!nameIng || !nameEgr) throw new Error('No se encontraron hojas INGRESOS y EGRESOS.');
 
-  const rows = [];
-  for (const obj of objects) {
-    if (Object.values(obj).every(v => v == null || v === '')) continue;
+  const wsIng = wb.Sheets[nameIng];
+  const wsEgr = wb.Sheets[nameEgr];
 
-    // ── Fecha ──
-    const fechaKey = findKey(obj, ['FECHA FAC.', 'FECHA FAC', 'FECHA FACTURA', 'FECHA']);
-    if (!fechaKey) continue;
-    const fecha = parseDate(obj[fechaKey]);
-    if (!fecha) continue;
+  // INGRESOS: fecha='FECHA DE PAGO', total='TOTAL', tipo='TIPO', nombre='NOMBRE DEL CLIENTE'
+  const rowsIng = parseSheetDirect(
+    wsIng, 'Ingreso',
+    ['FECHA DE PAGO', 'FECHA PAGO', 'FECHA'],
+    ['TOTAL'],
+    ['TIPO'],
+    ['NOMBRE DEL CLIENTE', 'NOMBRE CLIENTE', 'NOMBRE']
+  );
 
-    // ── Monto ──
-    const montoKey = findKey(obj, ['TOTAL', 'IMPORTE DEL CHEQUE O TRANSFERENCIA', 'IMPORTE']);
-    if (!montoKey) continue;
-    const total = parseMonto(obj[montoKey]);
-    if (isNaN(total) || total === 0) continue;
+  // EGRESOS: fecha='FECHA FAC.', total='TOTAL', tipo='TIPO', nombre='PROVEEDOR'
+  const rowsEgr = parseSheetDirect(
+    wsEgr, 'Egreso',
+    ['FECHA FAC', 'FECHA FACTURA', 'FECHA'],
+    ['TOTAL'],
+    ['TIPO'],
+    ['PROVEEDOR']
+  );
 
-    // ── Tipo ──
-    const tipoKey = findKey(obj, ['TIPO']);
-    const tipo = (tipoKey && obj[tipoKey]) ? String(obj[tipoKey]).trim() : 'Sin tipo';
+  const combined = [...rowsIng, ...rowsEgr];
+  if (combined.length === 0) return [];
 
-    // ── Proveedor ──
-    const provKey = findKey(obj, ['PROVEEDOR']);
-    const prov = (provKey && obj[provKey]) ? String(obj[provKey]).trim() : '—';
+  // Auto-detectar el año más frecuente en los datos
+  const yearCount = {};
+  for (const r of combined) yearCount[r.year] = (yearCount[r.year] || 0) + 1;
+  detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
 
-    rows.push({
-      fecha,
-      year:          fecha.getFullYear(),
-      mes:           fecha.getMonth(),
-      tipo_registro: 'Egreso',
-      tipo,
-      categoria:     tipo,
-      subcategoria:  prov,
-      monto:         Math.abs(total),
-    });
-  }
-  return rows;
+  return combined.filter(r => r.year === detectedYear);
 }
 
 // ══════════════════════════════════════════════════════
