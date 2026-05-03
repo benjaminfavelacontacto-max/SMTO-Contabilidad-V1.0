@@ -663,18 +663,18 @@ function renderCategoryTable(rows) {
 
 // ══════════════════════════════════════════════════════
 // TABLA AVANZADA DE TRANSACCIONES
-// Columnas filtrable + totales dinámicos
+// Filtros tipo Excel + totales dinámicos + sin límite de filas
 // ══════════════════════════════════════════════════════
 
 const TX_COLS = [
-  { key:'fecha_str',    label:'Fecha',            align:'left',  filterable:true,  numeric:false },
-  { key:'tipo_registro',label:'Movimiento',       align:'left',  filterable:true,  numeric:false },
-  { key:'tipo',         label:'Tipo',             align:'left',  filterable:true,  numeric:false },
-  { key:'subcategoria', label:'Proveedor / Cliente',align:'left',filterable:true,  numeric:false },
-  { key:'importe',      label:'Importe',          align:'right', filterable:false, numeric:true  },
-  { key:'iva',          label:'IVA',              align:'right', filterable:false, numeric:true  },
-  { key:'ret',          label:'Ret',              align:'right', filterable:false, numeric:true  },
-  { key:'monto',        label:'Total',            align:'right', filterable:false, numeric:true  },
+  { key:'fecha_str',    label:'Fecha',              align:'left',  filterable:true,  numeric:false },
+  { key:'tipo_registro',label:'Movimiento',         align:'left',  filterable:true,  numeric:false },
+  { key:'tipo',         label:'Tipo',               align:'left',  filterable:true,  numeric:false },
+  { key:'subcategoria', label:'Proveedor / Cliente', align:'left', filterable:true,  numeric:false },
+  { key:'importe',      label:'Importe',            align:'right', filterable:false, numeric:true  },
+  { key:'iva',          label:'IVA',                align:'right', filterable:false, numeric:true  },
+  { key:'ret',          label:'Ret',                align:'right', filterable:false, numeric:true  },
+  { key:'monto',        label:'Total',              align:'right', filterable:false, numeric:true  },
 ];
 
 function txGetVal(row, key) {
@@ -682,9 +682,14 @@ function txGetVal(row, key) {
   return String(row[key] ?? '');
 }
 
+/** Cuenta cuántos filtros de columna están activos */
+function txActiveFilterCount() {
+  return Object.values(txColFilters).filter(s => s && s.size > 0).length;
+}
+
 function renderTxTable(rows) {
-  txCurrentRows = [...rows].sort((a,b) => b.fecha - a.fecha);
-  txColFilters  = {};          // reset column filters when year/month changes
+  txCurrentRows = [...rows].sort((a, b) => b.fecha - a.fecha);
+  txColFilters  = {};
   txOpenCol     = null;
   buildTxHeader();
   refreshTxTable();
@@ -694,15 +699,39 @@ function refreshTxTable() {
   const visible = getTxFiltered();
   renderTxBody(visible);
   renderTxFooter(visible);
+
+  // Badge de registros
   const badge = document.getElementById('txBadge');
   badge.textContent = visible.length === txCurrentRows.length
-    ? `${visible.length} registros`
-    : `${visible.length} de ${txCurrentRows.length} registros`;
-  // Update active-filter dots on headers
+    ? `${visible.length.toLocaleString('es-MX')} registros`
+    : `${visible.length.toLocaleString('es-MX')} de ${txCurrentRows.length.toLocaleString('es-MX')} registros`;
+
+  // Resaltar botones de filtro activos + contador
   TX_COLS.filter(c => c.filterable).forEach(c => {
     const btn = document.querySelector(`.tx-filter-btn[data-col="${c.key}"]`);
-    if (btn) btn.classList.toggle('active', !!(txColFilters[c.key] && txColFilters[c.key].size > 0));
+    if (!btn) return;
+    const isActive = !!(txColFilters[c.key] && txColFilters[c.key].size > 0);
+    btn.classList.toggle('active', isActive);
+    // Actualizar el dot indicador dentro del botón
+    let dot = btn.querySelector('.tx-filter-dot');
+    if (isActive) {
+      if (!dot) {
+        dot = document.createElement('span');
+        dot.className = 'tx-filter-dot';
+        btn.appendChild(dot);
+      }
+    } else {
+      if (dot) dot.remove();
+    }
   });
+
+  // Botón "Limpiar todos" — aparece solo si hay filtros activos
+  const clearAllBtn = document.getElementById('txClearAllBtn');
+  if (clearAllBtn) {
+    const count = txActiveFilterCount();
+    clearAllBtn.style.display = count > 0 ? 'inline-flex' : 'none';
+    clearAllBtn.textContent   = count > 1 ? `Limpiar ${count} filtros` : 'Limpiar filtro';
+  }
 }
 
 function getTxFiltered() {
@@ -726,7 +755,7 @@ function buildTxHeader() {
       th.innerHTML = `
         <span class="th-label">${col.label}</span>
         <button class="tx-filter-btn" data-col="${col.key}" title="Filtrar por ${col.label}">
-          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
           </svg>
         </button>`;
@@ -742,55 +771,46 @@ function buildTxHeader() {
 }
 
 function renderTxBody(rows) {
-  const tbody  = document.getElementById('txTableBody');
-  const LIMIT  = 500;
-  const display = rows.length > LIMIT ? rows.slice(0, LIMIT) : rows;
-  const frag   = document.createDocumentFragment();
+  const tbody = document.getElementById('txTableBody');
+  const frag  = document.createDocumentFragment();
 
-  display.forEach(r => {
+  rows.forEach(r => {
     const isInc = r.tipo_registro === 'Ingreso';
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="td-date">${escHtml(formatDate(r.fecha))}</td>
-      <td><span class="type-badge ${isInc?'type-income':'type-expense'}">${r.tipo_registro}</span></td>
+      <td><span class="type-badge ${isInc ? 'type-income' : 'type-expense'}">${r.tipo_registro}</span></td>
       <td><strong class="td-tipo">${escHtml(r.tipo)}</strong></td>
       <td class="td-nombre">${escHtml(r.subcategoria)}</td>
-      <td class="text-right td-num">${r.importe > 0 ? formatMoney(r.importe) : '—'}</td>
-      <td class="text-right td-num">${r.iva     > 0 ? formatMoney(r.iva)     : '—'}</td>
-      <td class="text-right td-num">${r.ret     > 0 ? formatMoney(r.ret)     : '—'}</td>
-      <td class="text-right td-total" style="color:${isInc?'var(--income)':'var(--expense)'}">
-        ${isInc?'+':'-'}${formatMoney(r.monto)}
+      <td class="text-right td-num">${r.importe > 0 ? formatMoney(r.importe) : '<span class="td-nil">—</span>'}</td>
+      <td class="text-right td-num">${r.iva     > 0 ? formatMoney(r.iva)     : '<span class="td-nil">—</span>'}</td>
+      <td class="text-right td-num">${r.ret     > 0 ? formatMoney(r.ret)     : '<span class="td-nil">—</span>'}</td>
+      <td class="text-right td-total ${isInc ? 'td-total-inc' : 'td-total-egr'}">
+        ${isInc ? '+' : '-'}${formatMoney(r.monto)}
       </td>`;
     frag.appendChild(tr);
   });
-
-  // Nota si hay más filas
-  if (rows.length > LIMIT) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td colspan="8" class="tx-limit-note">
-      Mostrando ${LIMIT} de ${rows.length} filas — usa los filtros para ver un subconjunto específico
-    </td>`;
-    frag.appendChild(tr);
-  }
 
   tbody.innerHTML = '';
   tbody.appendChild(frag);
 }
 
 function renderTxFooter(rows) {
-  const sumImporte = rows.reduce((s,r)=>s+r.importe,0);
-  const sumIva     = rows.reduce((s,r)=>s+r.iva,    0);
-  const sumRet     = rows.reduce((s,r)=>s+r.ret,    0);
-  const sumTotal   = rows.reduce((s,r)=>s+r.monto,  0);
-  const el = id => document.getElementById(id);
-  if (el('footImporte')) el('footImporte').textContent = formatMoney(sumImporte);
-  if (el('footIva'))     el('footIva').textContent     = formatMoney(sumIva);
-  if (el('footRet'))     el('footRet').textContent     = formatMoney(sumRet);
-  if (el('footTotal'))   el('footTotal').textContent   = formatMoney(sumTotal);
-  if (el('footCount'))   el('footCount').textContent   = `${rows.length} registros`;
+  const sumImporte = rows.reduce((s, r) => s + r.importe, 0);
+  const sumIva     = rows.reduce((s, r) => s + r.iva,     0);
+  const sumRet     = rows.reduce((s, r) => s + r.ret,     0);
+  const sumTotal   = rows.reduce((s, r) => s + r.monto,   0);
+
+  const get = id => document.getElementById(id);
+  if (get('footImporte')) get('footImporte').textContent = formatMoney(sumImporte);
+  if (get('footIva'))     get('footIva').textContent     = formatMoney(sumIva);
+  if (get('footRet'))     get('footRet').textContent     = formatMoney(sumRet);
+  if (get('footTotal'))   get('footTotal').textContent   = formatMoney(sumTotal);
+  if (get('footCount'))   get('footCount').textContent   = `${rows.length.toLocaleString('es-MX')} registros`;
 }
 
-// ── DROPDOWN DE FILTRO ──
+// ── DROPDOWN TIPO EXCEL ──────────────────────────────
+
 function toggleTxDropdown(colKey, btn) {
   const existing = document.getElementById('txDropdownPanel');
   if (txOpenCol === colKey && existing) { closeTxDropdown(); return; }
@@ -800,52 +820,100 @@ function toggleTxDropdown(colKey, btn) {
 }
 
 function openTxDropdown(colKey, anchorBtn) {
-  // Unique values in current ALL rows (before column filter for other cols)
-  const uniqueVals = [...new Set(txCurrentRows.map(r => txGetVal(r, colKey)))].sort();
-  const activeSet  = txColFilters[colKey] || null;
+  const colLabel   = TX_COLS.find(c => c.key === colKey)?.label || colKey;
+  const allVals    = [...new Set(txCurrentRows.map(r => txGetVal(r, colKey)))].sort();
+  const activeSet  = txColFilters[colKey] || null;   // null → todos activos
+  const totalCount = allVals.length;
 
+  // ── Panel ──
   const panel = document.createElement('div');
-  panel.id = 'txDropdownPanel';
+  panel.id        = 'txDropdownPanel';
   panel.className = 'tx-dropdown-panel';
   panel.innerHTML = `
+    <div class="tx-dp-title">${escHtml(colLabel)}</div>
     <div class="tx-dp-head">
-      <input id="txDpSearch" class="tx-dp-search" placeholder="Buscar…" autocomplete="off"/>
-      <div class="tx-dp-actions">
-        <button id="txDpAll">Todos</button>
-        <button id="txDpNone">Ninguno</button>
+      <div class="tx-dp-search-wrap">
+        <svg class="tx-dp-search-icon" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="txDpSearch" class="tx-dp-search" placeholder="Buscar en ${totalCount} valores…" autocomplete="off"/>
       </div>
     </div>
     <div id="txDpList" class="tx-dp-list"></div>
     <div class="tx-dp-foot">
       <button id="txDpApply" class="tx-dp-btn-apply">Aplicar</button>
-      <button id="txDpClear" class="tx-dp-btn-clear">Limpiar filtro</button>
+      <button id="txDpClear" class="tx-dp-btn-clear">Limpiar</button>
     </div>`;
   document.body.appendChild(panel);
 
-  // Populate checkboxes
   const list = panel.querySelector('#txDpList');
-  function renderOptions(filter) {
+
+  // ── Renderiza checkboxes con "Seleccionar todo" al inicio ──
+  function renderOptions(filterText) {
     list.innerHTML = '';
-    uniqueVals
-      .filter(v => !filter || v.toLowerCase().includes(filter))
-      .forEach(val => {
-        const checked = !activeSet || activeSet.has(val);
-        const item = document.createElement('label');
-        item.className = 'tx-dp-item';
-        item.innerHTML = `
-          <input type="checkbox" value="${escHtml(val)}" ${checked?'checked':''}>
-          <span>${escHtml(val)}</span>`;
-        list.appendChild(item);
-      });
+    const filtered = allVals.filter(v => !filterText || v.toLowerCase().includes(filterText));
+
+    // Fila "Seleccionar todo" (solo sin búsqueda activa o con todos visibles)
+    const selectAllRow = document.createElement('label');
+    selectAllRow.className = 'tx-dp-item tx-dp-select-all-item';
+    const allChecked   = filtered.every(v => !activeSet || activeSet.has(v));
+    const someChecked  = filtered.some(v => !activeSet || activeSet.has(v));
+    selectAllRow.innerHTML = `
+      <input type="checkbox" id="txDpCbAll" ${allChecked ? 'checked' : ''}>
+      <span><strong>Seleccionar todo</strong></span>
+      <span class="tx-dp-count">${filtered.length}</span>`;
+    const cbAll = selectAllRow.querySelector('#txDpCbAll');
+    if (!allChecked && someChecked) cbAll.indeterminate = true;
+    cbAll.addEventListener('change', () => {
+      list.querySelectorAll('.tx-dp-value-cb').forEach(i => i.checked = cbAll.checked);
+    });
+    list.appendChild(selectAllRow);
+
+    // Separador
+    const sep = document.createElement('div');
+    sep.className = 'tx-dp-sep';
+    list.appendChild(sep);
+
+    // Items individuales
+    filtered.forEach(val => {
+      const checked = !activeSet || activeSet.has(val);
+      const item = document.createElement('label');
+      item.className = 'tx-dp-item';
+      item.innerHTML = `
+        <input type="checkbox" class="tx-dp-value-cb" value="${escHtml(val)}" ${checked ? 'checked' : ''}>
+        <span title="${escHtml(val)}">${escHtml(val)}</span>`;
+      list.appendChild(item);
+    });
+
+    // Actualizar estado del "Seleccionar todo" cuando cambia un item
+    list.addEventListener('change', e => {
+      if (e.target.classList.contains('tx-dp-value-cb')) {
+        const cbs      = [...list.querySelectorAll('.tx-dp-value-cb')];
+        const total    = cbs.length;
+        const selected = cbs.filter(i => i.checked).length;
+        const cbA      = list.querySelector('#txDpCbAll');
+        if (cbA) {
+          cbA.checked       = selected === total;
+          cbA.indeterminate = selected > 0 && selected < total;
+        }
+      }
+    });
   }
+
   renderOptions('');
 
-  panel.querySelector('#txDpSearch').addEventListener('input', e => renderOptions(e.target.value.toLowerCase()));
-  panel.querySelector('#txDpAll').addEventListener('click',  () => list.querySelectorAll('input').forEach(i=>i.checked=true));
-  panel.querySelector('#txDpNone').addEventListener('click', () => list.querySelectorAll('input').forEach(i=>i.checked=false));
+  // ── Búsqueda ──
+  panel.querySelector('#txDpSearch').addEventListener('input', e => {
+    renderOptions(e.target.value.toLowerCase());
+  });
+
+  // ── Aplicar ──
   panel.querySelector('#txDpApply').addEventListener('click', () => {
-    const checked = [...list.querySelectorAll('input:checked')].map(i=>i.value);
-    if (checked.length === uniqueVals.length) {
+    const checked = [...list.querySelectorAll('.tx-dp-value-cb:checked')].map(i => i.value);
+    if (checked.length === allVals.length) {
+      delete txColFilters[colKey];
+    } else if (checked.length === 0) {
+      // Ninguno seleccionado: sin cambio (o limpiar)
       delete txColFilters[colKey];
     } else {
       txColFilters[colKey] = new Set(checked);
@@ -853,19 +921,30 @@ function openTxDropdown(colKey, anchorBtn) {
     closeTxDropdown();
     refreshTxTable();
   });
+
+  // ── Limpiar este filtro ──
   panel.querySelector('#txDpClear').addEventListener('click', () => {
     delete txColFilters[colKey];
     closeTxDropdown();
     refreshTxTable();
   });
 
-  // Position below button (fixed → usa coordenadas del viewport directamente)
-  const rect = anchorBtn.getBoundingClientRect();
-  const panelW = 260;
+  // ── Posicionamiento viewport-relativo (position:fixed → sin scrollY) ──
+  const rect   = anchorBtn.getBoundingClientRect();
+  const panelW = 280;
+  const left   = Math.min(rect.left, window.innerWidth - panelW - 8);
   panel.style.top  = `${rect.bottom + 4}px`;
-  panel.style.left = `${Math.min(rect.left, window.innerWidth - panelW - 8)}px`;
+  panel.style.left = `${left}px`;
 
-  // Close on outside click
+  // Ajustar si se sale por abajo
+  requestAnimationFrame(() => {
+    const ph = panel.offsetHeight;
+    if (rect.bottom + ph > window.innerHeight - 8) {
+      panel.style.top = `${rect.top - ph - 4}px`;
+    }
+  });
+
+  // Cerrar al hacer clic fuera
   setTimeout(() => document.addEventListener('click', outsideTxClick), 0);
 }
 
@@ -879,6 +958,12 @@ function closeTxDropdown() {
   if (panel) panel.remove();
   txOpenCol = null;
   document.removeEventListener('click', outsideTxClick);
+}
+
+/** Limpia todos los filtros de columna activos */
+function clearAllTxFilters() {
+  txColFilters = {};
+  refreshTxTable();
 }
 
 // ══════════════════════════════════════════════════════
