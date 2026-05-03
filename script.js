@@ -10,8 +10,10 @@
 'use strict';
 
 // ─── ESTADO GLOBAL ────────────────────────────────────
-let allRows        = [];  // Todos los registros del año detectado
-let filteredRows   = [];  // Registros filtrados (por mes)
+let allRows        = [];  // Todos los registros (todos los años)
+let yearRows       = [];  // Registros del año seleccionado
+let filteredRows   = [];  // Registros filtrados (año + mes)
+let allYears       = [];  // Lista de años disponibles
 let barChartInst   = null;
 let donutChartInst = null;
 let tipoBarInst    = null;
@@ -70,11 +72,12 @@ function processFile(file) {
   reader.onload = (e) => {
     try {
       const data = new Uint8Array(e.target.result);
-      const wb   = XLSX.read(data, { type: 'array', cellDates: true });
+      // Sin cellDates:true — trabajamos con strings via raw:false
+      const wb = XLSX.read(data, { type: 'array' });
 
       let rows = [];
 
-      // ── MODO A: hojas INGRESOS + EGRESOS ──
+      // ── MODO A: hojas INGRESOS + EGRESOS (formato SMTO) ──
       const hasIngresos = wb.SheetNames.some(n => n.toUpperCase().includes('INGRESO'));
       const hasEgresos  = wb.SheetNames.some(n => n.toUpperCase().includes('EGRESO'));
 
@@ -82,22 +85,17 @@ function processFile(file) {
         rows = parseMultiSheet(wb);
       } else {
         // ── MODO B: hoja única genérica ──
-        const ws  = wb.Sheets[wb.SheetNames[0]];
-        const raw = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false });
-        if (!raw || raw.length === 0) throw new Error('La hoja de cálculo está vacía.');
-        rows = normalizeSingleSheet(raw);
+        rows = parseSingleSheet(wb.Sheets[wb.SheetNames[0]]);
       }
 
       if (rows.length === 0) {
-        const sheets = wb.SheetNames.join(', ');
         throw new Error(
-          `No se encontraron transacciones válidas. ` +
-          `Hojas encontradas: [${sheets}]. ` +
-          'Verifica que el archivo tenga hojas "INGRESOS" y "EGRESOS" con datos.'
+          `No se encontraron transacciones válidas en el archivo. ` +
+          `Hojas: [${wb.SheetNames.join(', ')}]. ` +
+          'Verifica que tenga hojas INGRESOS y EGRESOS con columnas de Fecha, Tipo y Total.'
         );
       }
 
-      allRows = rows;
       buildDashboard(rows);
     } catch (err) {
       hideLoading();
@@ -109,120 +107,116 @@ function processFile(file) {
 }
 
 // ══════════════════════════════════════════════════════
-// 3A. PARSER MULTI-HOJA — ACCESO DIRECTO A CELDAS
-//     Más robusto que sheet_to_json: lee ws['A1'], ws['B2']...
-//     sin depender de opciones de parseo de SheetJS.
+// 3A. PARSER MULTI-HOJA
+//     Estrategia: sheet_to_json con raw:false + dateNF.
+//     Todo llega como string → sin problemas de tipos.
 // ══════════════════════════════════════════════════════
 
-/** Obtiene el valor crudo de una celda (o null si no existe) */
-function cellVal(ws, r, c) {
-  const cell = ws[XLSX.utils.encode_cell({ r, c })];
-  if (!cell || cell.v == null) return null;
-  // Para celdas de fecha con cellDates:true → cell.v es Date
-  // Para celdas de fecha sin cellDates → cell.v es número serial
-  // Para texto/números → cell.v es string/number
-  return cell.v;
+/** Lee un worksheet como array de arrays de strings (sin tipos). */
+function wsToStrings(ws) {
+  return XLSX.utils.sheet_to_json(ws, {
+    header:  1,
+    raw:     false,       // TODO como string formateado
+    dateNF:  'yyyy-mm-dd', // Fechas → "2017-01-04"
+    defval:  '',          // Celdas vacías → ""
+  });
 }
 
-/** Obtiene el valor formateado (cell.w) como fallback para fechas en string */
-function cellText(ws, r, c) {
-  const cell = ws[XLSX.utils.encode_cell({ r, c })];
-  if (!cell) return null;
-  return cell.w || (cell.v != null ? String(cell.v) : null);
+/** Elige hoja por nombre: exacta primero, luego la más corta con la palabra. */
+function findSheetName(wb, keyword) {
+  const kw = keyword.toUpperCase();
+  const exact = wb.SheetNames.find(n => {
+    const u = n.trim().toUpperCase();
+    return u === kw || u === kw + 'S';
+  });
+  if (exact) return exact;
+  const partials = wb.SheetNames.filter(n => n.trim().toUpperCase().includes(kw));
+  return partials.length ? partials.sort((a,b)=>a.length-b.length)[0] : null;
 }
 
 /**
- * Escanea las primeras N filas de un worksheet buscando la fila de encabezados.
- * Devuelve: { headerR, cols } donde cols es un Map(nombreUpper → colIndex)
+ * Busca la fila de encabezados y mapea nombres → índice de columna.
+ * @returns {{ headerIdx, colMap }} o null
  */
-function scanHeaders(ws, dateKeywords, maxScan) {
-  if (!ws || !ws['!ref']) return null;
-  const range = XLSX.utils.decode_range(ws['!ref']);
-  maxScan = Math.min(maxScan || 25, range.e.r + 1);
-
-  for (let R = range.s.r; R < range.s.r + maxScan; R++) {
-    const cols = new Map();
-    let hasDate = false;
-
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const v = cellVal(ws, R, C);
-      if (v == null) continue;
-      const key = String(v).toUpperCase().trim();
-      if (key === '') continue;
-      cols.set(key, C);
-      if (dateKeywords.some(d => key.includes(d.toUpperCase()))) hasDate = true;
-    }
-
-    if (hasDate && cols.size >= 3) {
-      return { headerR: R, cols, range };
-    }
+function detectHeader(rows, dateHints, maxScan) {
+  maxScan = Math.min(maxScan || 25, rows.length);
+  for (let i = 0; i < maxScan; i++) {
+    const row = rows[i];
+    if (!row || !row.some(c => c)) continue;
+    // Verificar si esta fila contiene una columna de fecha
+    const hasDate = row.some(cell => {
+      const cu = String(cell).toUpperCase().trim();
+      return dateHints.some(h => cu.includes(h.toUpperCase()));
+    });
+    if (!hasDate) continue;
+    // Construir mapa de nombre→índice
+    const colMap = {};
+    row.forEach((cell, idx) => {
+      const k = String(cell).toUpperCase().trim();
+      if (k) colMap[k] = idx;
+    });
+    return { headerIdx: i, colMap };
   }
   return null;
 }
 
 /**
- * Busca el índice de columna dado un array de hints (exact → partial).
+ * Busca el índice de columna usando hints (exacto → parcial).
  */
-function colIndex(cols, hints) {
-  // Búsqueda exacta primero
+function findColIdx(colMap, hints) {
+  // Exacta
   for (const h of hints) {
     const k = h.toUpperCase().trim();
-    if (cols.has(k)) return cols.get(k);
+    if (colMap[k] !== undefined) return colMap[k];
   }
-  // Búsqueda parcial (la key del mapa contiene el hint)
+  // Parcial: el nombre de la columna contiene el hint
   for (const h of hints) {
     const k = h.toUpperCase().trim();
-    for (const [key, idx] of cols) {
-      if (key.includes(k)) return idx;
-    }
+    const key = Object.keys(colMap).find(ck => ck.includes(k));
+    if (key !== undefined) return colMap[key];
   }
   return -1;
 }
 
 /**
- * Parser genérico por acceso directo a celdas.
- * @param {object} ws         - Worksheet de SheetJS
- * @param {string} tipoReg    - 'Ingreso' | 'Egreso'
- * @param {string[]} dateH    - Hints para columna fecha
- * @param {string[]} totalH   - Hints para columna monto
- * @param {string[]} tipoH    - Hints para columna tipo
- * @param {string[]} nameH    - Hints para columna nombre/proveedor
+ * Parser principal: strings → filas normalizadas.
+ * Recibe el worksheet, el tipo (Ingreso/Egreso) y hints de columnas.
  */
-function parseSheetDirect(ws, tipoReg, dateH, totalH, tipoH, nameH) {
-  const found = scanHeaders(ws, dateH);
-  if (!found) return [];
+function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHints) {
+  if (!ws) return [];
+  const rows = wsToStrings(ws);
+  if (!rows.length) return [];
 
-  const { headerR, cols, range } = found;
-  const cFecha  = colIndex(cols, dateH);
-  const cTotal  = colIndex(cols, totalH);
-  const cTipo   = colIndex(cols, tipoH);
-  const cNombre = colIndex(cols, nameH);
+  const hdr = detectHeader(rows, dateHints);
+  if (!hdr) return [];
+
+  const { headerIdx, colMap } = hdr;
+  const cFecha  = findColIdx(colMap, dateHints);
+  const cTotal  = findColIdx(colMap, totalHints);
+  const cTipo   = findColIdx(colMap, tipoHints);
+  const cNombre = findColIdx(colMap, nameHints);
 
   if (cFecha === -1 || cTotal === -1) return [];
 
-  const rows = [];
+  const result = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || !row.some(c => c)) continue; // fila vacía
 
-  for (let R = headerR + 1; R <= range.e.r; R++) {
-    const rawFecha = cellVal(ws, R, cFecha);
-    const rawTotal = cellVal(ws, R, cTotal);
+    const rawFecha = row[cFecha] || '';
+    const rawTotal = row[cTotal] || '';
+    if (!rawFecha && !rawTotal) continue;
 
-    // Fila vacía
-    if (rawFecha == null && rawTotal == null) continue;
-
-    // Parsear fecha — también intenta el texto formateado de la celda
-    let fecha = parseDate(rawFecha);
-    if (!fecha) fecha = parseDate(cellText(ws, R, cFecha));
+    const fecha = parseDate(rawFecha);
     if (!fecha) continue;
 
     const total = parseMonto(rawTotal);
     if (isNaN(total) || total === 0) continue;
 
-    const rawTipo   = cTipo   >= 0 ? cellVal(ws, R, cTipo)   : null;
-    const rawNombre = cNombre >= 0 ? cellVal(ws, R, cNombre) : null;
-    const tipo   = rawTipo   != null ? String(rawTipo).trim()   : 'Sin tipo';
-    const nombre = rawNombre != null ? String(rawNombre).trim() : '—';
+    const tipo   = cTipo   >= 0 && row[cTipo]   ? String(row[cTipo]).trim()   : 'Sin tipo';
+    const nombre = cNombre >= 0 && row[cNombre] ? String(row[cNombre]).trim() : '—';
 
-    rows.push({
+    result.push({
       fecha,
       year:          fecha.getFullYear(),
       mes:           fecha.getMonth(),
@@ -233,21 +227,7 @@ function parseSheetDirect(ws, tipoReg, dateH, totalH, tipoH, nameH) {
       monto:         Math.abs(total),
     });
   }
-  return rows;
-}
-
-/** Elige la hoja correcta: primero coincidencia exacta, luego la más corta */
-function findSheetName(wb, keyword) {
-  const kw = keyword.toUpperCase();
-  // Exacta (INGRESOS, EGRESOS)
-  const exact = wb.SheetNames.find(n => {
-    const u = n.trim().toUpperCase();
-    return u === kw || u === kw + 'S';
-  });
-  if (exact) return exact;
-  // Más corta que contiene la palabra
-  const partials = wb.SheetNames.filter(n => n.trim().toUpperCase().includes(kw));
-  return partials.length ? partials.sort((a,b) => a.length - b.length)[0] : null;
+  return result;
 }
 
 function parseMultiSheet(wb) {
@@ -255,25 +235,20 @@ function parseMultiSheet(wb) {
   const nameEgr = findSheetName(wb, 'EGRESO');
   if (!nameIng || !nameEgr) throw new Error('No se encontraron hojas INGRESOS y EGRESOS.');
 
-  const wsIng = wb.Sheets[nameIng];
-  const wsEgr = wb.Sheets[nameEgr];
-
-  // INGRESOS: fecha='FECHA DE PAGO', total='TOTAL', tipo='TIPO', nombre='NOMBRE DEL CLIENTE'
-  const rowsIng = parseSheetDirect(
-    wsIng, 'Ingreso',
-    ['FECHA DE PAGO', 'FECHA PAGO', 'FECHA'],
-    ['TOTAL'],
-    ['TIPO'],
-    ['NOMBRE DEL CLIENTE', 'NOMBRE CLIENTE', 'NOMBRE']
+  const rowsIng = parseSheetStrings(
+    wb.Sheets[nameIng], 'Ingreso',
+    ['FECHA DE PAGO', 'FECHA PAGO', 'FECHA'],  // date hints
+    ['TOTAL'],                                   // amount hints
+    ['TIPO'],                                    // type hints
+    ['NOMBRE DEL CLIENTE', 'NOMBRE CLIENTE', 'NOMBRE'] // name hints
   );
 
-  // EGRESOS: fecha='FECHA FAC.', total='TOTAL', tipo='TIPO', nombre='PROVEEDOR'
-  const rowsEgr = parseSheetDirect(
-    wsEgr, 'Egreso',
-    ['FECHA FAC', 'FECHA FACTURA', 'FECHA'],
-    ['TOTAL'],
-    ['TIPO'],
-    ['PROVEEDOR']
+  const rowsEgr = parseSheetStrings(
+    wb.Sheets[nameEgr], 'Egreso',
+    ['FECHA FAC', 'FECHA FACTURA', 'FECHA'],    // date hints
+    ['TOTAL'],                                   // amount hints
+    ['TIPO'],                                    // type hints
+    ['PROVEEDOR']                                // name hints
   );
 
   const combined = [...rowsIng, ...rowsEgr];
@@ -284,7 +259,8 @@ function parseMultiSheet(wb) {
   for (const r of combined) yearCount[r.year] = (yearCount[r.year] || 0) + 1;
   detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
 
-  return combined.filter(r => r.year === detectedYear);
+  // Retornar TODOS los años (el filtrado por año ocurre en buildDashboard)
+  return combined;
 }
 
 // ══════════════════════════════════════════════════════
@@ -356,11 +332,22 @@ function normalizeSingleSheet(raw) {
 
   if (rows.length === 0) return [];
 
-  // Auto-detectar año
+  // Auto-detectar año dominante
   const yearCount = {};
   for (const r of rows) yearCount[r.year] = (yearCount[r.year] || 0) + 1;
   detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
-  return rows.filter(r => r.year === detectedYear);
+
+  // Retornar TODOS los años
+  return rows;
+}
+
+/** Wrapper: recibe un worksheet, normaliza con la función genérica. */
+function parseSingleSheet(ws) {
+  const raw = XLSX.utils.sheet_to_json(ws, {
+    raw: false, dateNF: 'yyyy-mm-dd', defval: '',
+  });
+  if (!raw || raw.length === 0) throw new Error('La hoja no contiene datos.');
+  return normalizeSingleSheet(raw);
 }
 
 // ══════════════════════════════════════════════════════
@@ -368,19 +355,27 @@ function normalizeSingleSheet(raw) {
 // ══════════════════════════════════════════════════════
 
 function buildDashboard(rows) {
-  filteredRows = rows;
-  renderKPIs(rows);
-  renderBarChart(rows);
-  renderDonutChart(rows);
-  renderTipoCharts(rows);
-  renderCategoryTable(rows);
-  renderTxTable(rows);
-  buildMonthFilter(rows);
+  allRows  = rows;
+  allYears = [...new Set(rows.map(r => r.year))].sort((a,b) => a - b);
+
+  // Por defecto mostrar el año más frecuente
+  yearRows     = rows.filter(r => r.year === detectedYear);
+  filteredRows = yearRows;
+
+  renderKPIs(filteredRows);
+  renderBarChart(filteredRows);
+  renderDonutChart(filteredRows);
+  renderTipoCharts(filteredRows);
+  renderCategoryTable(filteredRows);
+  renderTxTable(filteredRows);
+  buildYearFilter(rows);
+  buildMonthFilter(yearRows);
 
   hideLoading();
   document.getElementById('uploadSection').classList.add('hidden');
   document.getElementById('dashboardSection').classList.remove('hidden');
   document.getElementById('dashSubtitle').textContent = `Año ${detectedYear}`;
+  document.getElementById('yearFilterWrapper').classList.remove('hidden');
   document.getElementById('monthFilterWrapper').classList.remove('hidden');
   document.getElementById('exportCsvBtn').classList.remove('hidden');
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -609,7 +604,39 @@ function renderTxTable(rows) {
 }
 
 // ══════════════════════════════════════════════════════
-// 5. FILTRO POR MES
+// 5A. FILTRO POR AÑO
+// ══════════════════════════════════════════════════════
+
+function buildYearFilter(rows) {
+  const years = [...new Set(rows.map(r => r.year))].sort((a,b) => a - b);
+  const sel   = document.getElementById('yearFilter');
+  while (sel.options.length > 1) sel.remove(1);
+  for (const y of years) {
+    const opt = document.createElement('option');
+    opt.value = y; opt.textContent = y;
+    sel.appendChild(opt);
+  }
+  sel.value = String(detectedYear);
+  sel.onchange = () => applyYearFilter(sel.value);
+}
+
+function applyYearFilter(val) {
+  yearRows     = val === 'all' ? allRows : allRows.filter(r => r.year === parseInt(val, 10));
+  filteredRows = yearRows;
+  buildMonthFilter(yearRows);
+  document.getElementById('monthFilter').value = 'all';
+  renderKPIs(filteredRows);
+  renderBarChart(filteredRows);
+  renderDonutChart(filteredRows);
+  renderTipoCharts(filteredRows);
+  renderCategoryTable(filteredRows);
+  renderTxTable(filteredRows);
+  const label = val === 'all' ? 'Todos los años' : `Año ${val}`;
+  document.getElementById('dashSubtitle').textContent = label;
+}
+
+// ══════════════════════════════════════════════════════
+// 5B. FILTRO POR MES
 // ══════════════════════════════════════════════════════
 
 function buildMonthFilter(rows) {
@@ -625,14 +652,16 @@ function buildMonthFilter(rows) {
 }
 
 function applyMonthFilter(val) {
-  filteredRows = val==='all' ? allRows : allRows.filter(r=>r.mes===parseInt(val,10));
+  filteredRows = val==='all' ? yearRows : yearRows.filter(r=>r.mes===parseInt(val,10));
   renderKPIs(filteredRows);
   renderBarChart(filteredRows);
   renderDonutChart(filteredRows);
   renderTipoCharts(filteredRows);
   renderCategoryTable(filteredRows);
   renderTxTable(filteredRows);
-  const label = val==='all' ? `Año ${detectedYear}` : `${MONTHS_LONG[parseInt(val,10)]} ${detectedYear}`;
+  const yearSel = document.getElementById('yearFilter').value;
+  const yearLabel = yearSel === 'all' ? 'Todos los años' : `Año ${yearSel}`;
+  const label = val==='all' ? yearLabel : `${MONTHS_LONG[parseInt(val,10)]} — ${yearLabel}`;
   document.getElementById('dashSubtitle').textContent = label;
 }
 
@@ -679,11 +708,13 @@ function toggleTheme() {
 // ══════════════════════════════════════════════════════
 
 function resetApp() {
-  allRows=[]; filteredRows=[];
+  allRows=[]; yearRows=[]; filteredRows=[]; allYears=[];
   document.getElementById('dashboardSection').classList.add('hidden');
+  document.getElementById('yearFilterWrapper').classList.add('hidden');
   document.getElementById('monthFilterWrapper').classList.add('hidden');
   document.getElementById('exportCsvBtn').classList.add('hidden');
   document.getElementById('uploadSection').classList.remove('hidden');
+  document.getElementById('yearFilter').value='all';
   document.getElementById('monthFilter').value='all';
   document.getElementById('fileInput').value='';
   [barChartInst,donutChartInst].forEach(c=>{if(c){c.destroy();}});
