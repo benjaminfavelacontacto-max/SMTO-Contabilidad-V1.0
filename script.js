@@ -115,10 +115,27 @@ function processFile(file) {
 //               IMPORTE(7) IVA(8) RET(9) TOTAL(10)
 // ══════════════════════════════════════════════════════
 
+function findSheetName(wb, keyword) {
+  const names = wb.SheetNames;
+  const kw    = keyword.toUpperCase();
+  // 1) Coincidencia exacta (ej: 'INGRESOS' === 'INGRESOS')
+  const exact = names.find(n => n.trim().toUpperCase() === kw || n.trim().toUpperCase() === kw + 'S');
+  if (exact) return exact;
+  // 2) Nombre más corto que contiene la palabra (evita pivot tables largas)
+  const partials = names.filter(n => n.trim().toUpperCase().includes(kw));
+  if (partials.length === 0) return null;
+  return partials.sort((a,b) => a.length - b.length)[0];
+}
+
 function parseMultiSheet(wb) {
-  // Encontrar hojas exactas
-  const nameIng = wb.SheetNames.find(n => n.toUpperCase().includes('INGRESO'));
-  const nameEgr = wb.SheetNames.find(n => n.toUpperCase().includes('EGRESO'));
+  // Preferir hojas con nombre exacto 'INGRESOS' / 'EGRESOS'
+  // Si no existen, tomar la que más se parezca (nombre más corto)
+  const nameIng = findSheetName(wb, 'INGRESO');
+  const nameEgr = findSheetName(wb, 'EGRESO');
+
+  if (!nameIng || !nameEgr) {
+    throw new Error('No se encontraron hojas de INGRESOS y EGRESOS en el archivo.');
+  }
 
   const rowsIng = parseSheetIngresos(wb.Sheets[nameIng]);
   const rowsEgr = parseSheetEgresos(wb.Sheets[nameEgr]);
@@ -136,82 +153,129 @@ function parseMultiSheet(wb) {
   return combined.filter(r => r.year === detectedYear);
 }
 
-function parseSheetIngresos(ws) {
-  // Convertir a array de arrays para acceso por índice (más robusto que json)
-  const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const rows = [];
-
-  // Encontrar la fila de encabezados buscando "NOMBRE DEL CLIENTE" o "TIPO"
-  let startRow = -1;
-  for (let i = 0; i < Math.min(data.length, 15); i++) {
-    const row = data[i];
-    if (row && row.some(c => c && String(c).toUpperCase().includes('NOMBRE'))) {
-      startRow = i + 1; // datos empiezan en la siguiente fila
-      break;
-    }
+/**
+ * Encuentra el índice de la fila de encabezados buscando una keyword.
+ * Retorna el índice 0-based dentro del array raw, o -1 si no se encuentra.
+ */
+function findHeaderRow(rawArrays, keywords, maxScan = 20) {
+  for (let i = 0; i < Math.min(rawArrays.length, maxScan); i++) {
+    const row = rawArrays[i];
+    if (!row) continue;
+    const rowStr = row.map(c => c != null ? String(c).toUpperCase() : '').join('|');
+    if (keywords.some(kw => rowStr.includes(kw.toUpperCase()))) return i;
   }
-  if (startRow === -1) startRow = 3; // fallback
+  return -1;
+}
 
-  for (let i = startRow; i < data.length; i++) {
-    const row = data[i];
-    if (!row || row.every(c => c === null)) continue;
+/**
+ * Busca una clave en un objeto (insensible a mayúsculas, espacios y tildes).
+ */
+function findKey(obj, hints) {
+  const keys = Object.keys(obj);
+  for (const hint of hints) {
+    const h = hint.toUpperCase().trim();
+    const k = keys.find(k => k.toUpperCase().trim() === h);
+    if (k) return k;
+  }
+  // fallback: partial match
+  for (const hint of hints) {
+    const h = hint.toUpperCase().trim();
+    const k = keys.find(k => k.toUpperCase().trim().includes(h));
+    if (k) return k;
+  }
+  return null;
+}
 
-    const fecha = parseDate(row[7]); // FECHA DE PAGO
-    const tipo  = row[2] ? String(row[2]).trim() : 'Sin tipo';
-    const total = parseFloat(row[6]); // TOTAL
-    const nombre= row[1] ? String(row[1]).trim() : '—';
+function parseSheetIngresos(ws) {
+  // Paso 1: Obtener arrays crudos para localizar el encabezado
+  const rawArrays = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const headerIdx = findHeaderRow(rawArrays, ['NOMBRE DEL CLIENTE', 'RFC CLIENTE', 'FECHA DE PAGO']);
+  if (headerIdx === -1) return [];
 
-    if (!fecha || isNaN(total) || total === 0) continue;
+  // Paso 2: Releer desde la fila de encabezado usando nombres de columna
+  const objects = XLSX.utils.sheet_to_json(ws, { range: headerIdx, defval: null });
+
+  const rows = [];
+  for (const obj of objects) {
+    // Saltar filas completamente vacías
+    if (Object.values(obj).every(v => v == null || v === '')) continue;
+
+    // ── Fecha ──
+    const fechaKey = findKey(obj, ['FECHA DE PAGO', 'FECHA PAGO', 'FECHA']);
+    if (!fechaKey) continue;
+    const fecha = parseDate(obj[fechaKey]);
+    if (!fecha) continue;
+
+    // ── Monto ──
+    const montoKey = findKey(obj, ['TOTAL', 'IMPORTE DEL CHEQUE O TRANSFERENCIA ELECTRONICA', 'IMPORTE']);
+    if (!montoKey) continue;
+    const total = parseMonto(obj[montoKey]);
+    if (isNaN(total) || total === 0) continue;
+
+    // ── Tipo ──
+    const tipoKey = findKey(obj, ['TIPO']);
+    const tipo = (tipoKey && obj[tipoKey]) ? String(obj[tipoKey]).trim() : 'Sin tipo';
+
+    // ── Cliente ──
+    const nombreKey = findKey(obj, ['NOMBRE DEL CLIENTE', 'NOMBRE CLIENTE', 'NOMBRE']);
+    const nombre = (nombreKey && obj[nombreKey]) ? String(obj[nombreKey]).trim() : '—';
 
     rows.push({
       fecha,
-      year:         fecha.getFullYear(),
-      mes:          fecha.getMonth(),
-      tipo_registro:'Ingreso',
+      year:          fecha.getFullYear(),
+      mes:           fecha.getMonth(),
+      tipo_registro: 'Ingreso',
       tipo,
-      categoria:    tipo,
-      subcategoria: nombre,
-      monto:        Math.abs(total),
+      categoria:     tipo,
+      subcategoria:  nombre,
+      monto:         Math.abs(total),
     });
   }
   return rows;
 }
 
 function parseSheetEgresos(ws) {
-  const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  // Paso 1: Localizar encabezado
+  const rawArrays = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const headerIdx = findHeaderRow(rawArrays, ['PROVEEDOR', 'RFC PROVEEDOR', 'FECHA FAC']);
+  if (headerIdx === -1) return [];
+
+  // Paso 2: Releer con nombres de columna desde el encabezado
+  const objects = XLSX.utils.sheet_to_json(ws, { range: headerIdx, defval: null });
+
   const rows = [];
+  for (const obj of objects) {
+    if (Object.values(obj).every(v => v == null || v === '')) continue;
 
-  // Buscar fila de encabezados por "PROVEEDOR"
-  let startRow = -1;
-  for (let i = 0; i < Math.min(data.length, 10); i++) {
-    const row = data[i];
-    if (row && row.some(c => c && String(c).toUpperCase().includes('PROVEEDOR'))) {
-      startRow = i + 1;
-      break;
-    }
-  }
-  if (startRow === -1) startRow = 5; // fallback
+    // ── Fecha ──
+    const fechaKey = findKey(obj, ['FECHA FAC.', 'FECHA FAC', 'FECHA FACTURA', 'FECHA']);
+    if (!fechaKey) continue;
+    const fecha = parseDate(obj[fechaKey]);
+    if (!fecha) continue;
 
-  for (let i = startRow; i < data.length; i++) {
-    const row = data[i];
-    if (!row || row.every(c => c === null)) continue;
+    // ── Monto ──
+    const montoKey = findKey(obj, ['TOTAL', 'IMPORTE DEL CHEQUE O TRANSFERENCIA', 'IMPORTE']);
+    if (!montoKey) continue;
+    const total = parseMonto(obj[montoKey]);
+    if (isNaN(total) || total === 0) continue;
 
-    const fecha = parseDate(row[5]);  // FECHA FAC.
-    const tipo  = row[2] ? String(row[2]).trim() : 'Sin tipo';
-    const total = parseFloat(row[10]); // TOTAL
-    const prov  = row[1] ? String(row[1]).trim() : '—';
+    // ── Tipo ──
+    const tipoKey = findKey(obj, ['TIPO']);
+    const tipo = (tipoKey && obj[tipoKey]) ? String(obj[tipoKey]).trim() : 'Sin tipo';
 
-    if (!fecha || isNaN(total) || total === 0) continue;
+    // ── Proveedor ──
+    const provKey = findKey(obj, ['PROVEEDOR']);
+    const prov = (provKey && obj[provKey]) ? String(obj[provKey]).trim() : '—';
 
     rows.push({
       fecha,
-      year:         fecha.getFullYear(),
-      mes:          fecha.getMonth(),
-      tipo_registro:'Egreso',
+      year:          fecha.getFullYear(),
+      mes:           fecha.getMonth(),
+      tipo_registro: 'Egreso',
       tipo,
-      categoria:    tipo,
-      subcategoria: prov,
-      monto:        Math.abs(total),
+      categoria:     tipo,
+      subcategoria:  prov,
+      monto:         Math.abs(total),
     });
   }
   return rows;
@@ -657,20 +721,46 @@ function contar(rows, key) {
 
 // ── Parsear fecha ──
 function parseDate(val) {
-  if (!val) return null;
-  if (val instanceof Date) return isNaN(val.getTime())?null:val;
-  if (typeof val==='number') {
-    const d = XLSX.SSF.parse_date_code(val);
-    return d ? new Date(d.y,d.m-1,d.d) : null;
+  if (val == null || val === '') return null;
+
+  // Ya es Date (SheetJS con cellDates:true)
+  if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
+
+  // Número → serial de Excel (ej: 42739 = 4-Ene-2017)
+  if (typeof val === 'number') {
+    // Excel serial: días desde 1-Ene-1900, con bug de año bisiesto 1900
+    // Equivalente JS: (serial - 25569) días desde 1-Ene-1970 en UTC
+    if (val < 1 || val > 2958465) return null; // rango sensato (1900–9999)
+    const ms  = Math.round((val - 25569) * 86400 * 1000);
+    const utc = new Date(ms);
+    // Convertir a fecha local (evitar off-by-one por timezone)
+    return new Date(utc.getUTCFullYear(), utc.getUTCMonth(), utc.getUTCDate());
   }
+
+  // String
   const str = String(val).trim();
   if (!str) return null;
+
+  // ISO y otros formatos parseables por el motor JS
   const direct = new Date(str);
-  if (!isNaN(direct.getTime())) return direct;
+  if (!isNaN(direct.getTime())) {
+    return new Date(direct.getFullYear(), direct.getMonth(), direct.getDate());
+  }
+
+  // DD/MM/YYYY o DD-MM-YYYY
   const ddmm = str.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
-  if (ddmm) { const d=new Date(+ddmm[3],+ddmm[2]-1,+ddmm[1]); if(!isNaN(d))return d; }
+  if (ddmm) {
+    const d = new Date(+ddmm[3], +ddmm[2]-1, +ddmm[1]);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // YYYY/MM/DD
   const yyyymm = str.match(/^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})$/);
-  if (yyyymm) { const d=new Date(+yyyymm[1],+yyyymm[2]-1,+yyyymm[3]); if(!isNaN(d))return d; }
+  if (yyyymm) {
+    const d = new Date(+yyyymm[1], +yyyymm[2]-1, +yyyymm[3]);
+    if (!isNaN(d.getTime())) return d;
+  }
+
   return null;
 }
 
