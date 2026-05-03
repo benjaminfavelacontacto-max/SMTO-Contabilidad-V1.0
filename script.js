@@ -532,7 +532,7 @@ function renderTipoBar(rows, canvasId, color, badgeId) {
       responsive:true, maintainAspectRatio:false,
       plugins:{
         legend:{display:false},
-        tooltip: tooltipDefaults(isDark, v => formatMoney(v)),
+        tooltip: tooltipDefaults(isDark, v => formatMoney(v), false, true),
       },
       scales:{
         x:{grid:{color:grid}, border:{display:false},
@@ -830,7 +830,8 @@ function escHtml(s) {
 }
 
 // Opciones base para tooltips de Chart.js
-function tooltipDefaults(isDark, labelFn, isDonut=false) {
+// horizontal=true para barras horizontales (indexAxis:'y') → el valor está en ctx.parsed.x
+function tooltipDefaults(isDark, labelFn, isDonut=false, horizontal=false) {
   return {
     backgroundColor: isDark?'#1e293b':'#fff',
     titleColor:      isDark?'#f1f5f9':'#0f172a',
@@ -840,7 +841,9 @@ function tooltipDefaults(isDark, labelFn, isDonut=false) {
     callbacks: {
       label: isDonut
         ? ctx => labelFn(ctx.parsed, ctx)
-        : ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.parsed.y ?? ctx.parsed)}`,
+        : horizontal
+          ? ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.parsed.x)}`
+          : ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.parsed.y ?? ctx.parsed)}`,
     },
   };
 }
