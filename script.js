@@ -1,19 +1,23 @@
 /* ══════════════════════════════════════════════════════
    FinDash — script.js
-   Lógica principal: lectura de Excel, procesamiento,
-   generación de gráficas y tabla de datos.
+   Soporta dos modos de lectura:
+     A) Multi-hoja: hojas "INGRESOS" y "EGRESOS" separadas
+        (formato SMTO: columnas específicas por hoja)
+     B) Hoja única: columnas Fecha, Tipo, Categoría, Monto
+   El año se detecta automáticamente desde los datos.
 ══════════════════════════════════════════════════════ */
 
 'use strict';
 
 // ─── ESTADO GLOBAL ────────────────────────────────────
-let allRows       = [];   // Todos los registros del año actual
-let filteredRows  = [];   // Registros filtrados (por mes)
-let barChartInst  = null; // Instancia de Chart.js (barras)
-let donutChartInst= null; // Instancia de Chart.js (dona)
-const CURRENT_YEAR = new Date().getFullYear();
+let allRows        = [];  // Todos los registros del año detectado
+let filteredRows   = [];  // Registros filtrados (por mes)
+let barChartInst   = null;
+let donutChartInst = null;
+let tipoBarInst    = null;
+let detectedYear   = new Date().getFullYear();
 
-// ─── PALETA DE COLORES PARA CATEGORÍAS ───────────────
+// ─── PALETA ──────────────────────────────────────────
 const PALETTE = [
   '#6366f1','#8b5cf6','#ec4899','#f43f5e',
   '#f97316','#f59e0b','#10b981','#14b8a6',
@@ -21,43 +25,29 @@ const PALETTE = [
   '#e879f9','#fb7185','#fbbf24','#34d399',
 ];
 
-// Meses en español
-const MONTHS_ES = [
-  'Ene','Feb','Mar','Abr','May','Jun',
-  'Jul','Ago','Sep','Oct','Nov','Dic'
-];
-const MONTHS_LONG = [
-  'Enero','Febrero','Marzo','Abril','Mayo','Junio',
-  'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'
-];
+const MONTHS_ES   = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+const MONTHS_LONG = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
 // ══════════════════════════════════════════════════════
 // 1. DRAG & DROP / FILE INPUT
 // ══════════════════════════════════════════════════════
 
-function triggerFileInput() {
-  document.getElementById('fileInput').click();
-}
+function triggerFileInput() { document.getElementById('fileInput').click(); }
 
 function handleDragOver(e) {
   e.preventDefault();
-  e.stopPropagation();
   document.getElementById('dropZone').classList.add('drag-over');
 }
-
 function handleDragLeave(e) {
   e.preventDefault();
   document.getElementById('dropZone').classList.remove('drag-over');
 }
-
 function handleDrop(e) {
   e.preventDefault();
-  e.stopPropagation();
   document.getElementById('dropZone').classList.remove('drag-over');
   const file = e.dataTransfer.files[0];
   if (file) processFile(file);
 }
-
 function handleFileChange(e) {
   const file = e.target.files[0];
   if (file) processFile(file);
@@ -68,13 +58,11 @@ function handleFileChange(e) {
 // ══════════════════════════════════════════════════════
 
 function processFile(file) {
-  // Validar extensión
   const ext = file.name.split('.').pop().toLowerCase();
   if (!['xlsx','xls'].includes(ext)) {
     showError('El archivo debe ser .xlsx o .xls. Por favor verifica el formato.');
     return;
   }
-
   hideError();
   showLoading();
 
@@ -84,24 +72,26 @@ function processFile(file) {
       const data = new Uint8Array(e.target.result);
       const wb   = XLSX.read(data, { type: 'array', cellDates: true });
 
-      // Tomar la primera hoja
-      const sheetName = wb.SheetNames[0];
-      const ws        = wb.Sheets[sheetName];
+      let rows = [];
 
-      // Convertir a JSON (primera fila como headers)
-      const raw = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false });
+      // ── MODO A: hojas INGRESOS + EGRESOS ──
+      const hasIngresos = wb.SheetNames.some(n => n.toUpperCase().includes('INGRESO'));
+      const hasEgresos  = wb.SheetNames.some(n => n.toUpperCase().includes('EGRESO'));
 
-      if (!raw || raw.length === 0) {
-        throw new Error('La hoja de cálculo está vacía o no tiene datos válidos.');
+      if (hasIngresos && hasEgresos) {
+        rows = parseMultiSheet(wb);
+      } else {
+        // ── MODO B: hoja única genérica ──
+        const ws  = wb.Sheets[wb.SheetNames[0]];
+        const raw = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false });
+        if (!raw || raw.length === 0) throw new Error('La hoja de cálculo está vacía.');
+        rows = normalizeSingleSheet(raw);
       }
-
-      // Normalizar columnas y limpiar datos
-      const rows = normalizeRows(raw);
 
       if (rows.length === 0) {
         throw new Error(
-          `No se encontraron transacciones del año ${CURRENT_YEAR}. ` +
-          'Verifica que el Excel tenga columnas de Fecha, Tipo y Monto.'
+          `No se encontraron transacciones para el año ${detectedYear}. ` +
+          'Verifica el archivo o los encabezados.'
         );
       }
 
@@ -112,29 +102,131 @@ function processFile(file) {
       showError(err.message || 'Error al leer el archivo. Verifica que sea un Excel válido.');
     }
   };
-
-  reader.onerror = () => {
-    hideLoading();
-    showError('No se pudo leer el archivo. Intenta de nuevo.');
-  };
-
+  reader.onerror = () => { hideLoading(); showError('No se pudo leer el archivo. Intenta de nuevo.'); };
   reader.readAsArrayBuffer(file);
 }
 
 // ══════════════════════════════════════════════════════
-// 3. NORMALIZACIÓN DE DATOS
+// 3A. PARSER MULTI-HOJA (formato SMTO)
+//     INGRESOS: RFC(0) NOMBRE(1) TIPO(2) FACTURA(3)
+//               IMPORTE(4) IVA(5) TOTAL(6) FECHA_PAGO(7)
+//     EGRESOS:  RFC(0) PROVEEDOR(1) TIPO(2) POLIZA(3)
+//               FACTURA(4) FECHA_FAC(5) CONCEPTO(6)
+//               IMPORTE(7) IVA(8) RET(9) TOTAL(10)
 // ══════════════════════════════════════════════════════
 
-/**
- * Mapeo flexible de nombres de columnas.
- * Detecta variantes en mayúsculas/minúsculas y otros idiomas.
- */
+function parseMultiSheet(wb) {
+  // Encontrar hojas exactas
+  const nameIng = wb.SheetNames.find(n => n.toUpperCase().includes('INGRESO'));
+  const nameEgr = wb.SheetNames.find(n => n.toUpperCase().includes('EGRESO'));
+
+  const rowsIng = parseSheetIngresos(wb.Sheets[nameIng]);
+  const rowsEgr = parseSheetEgresos(wb.Sheets[nameEgr]);
+  const combined = [...rowsIng, ...rowsEgr];
+
+  if (combined.length === 0) return [];
+
+  // Auto-detectar año más frecuente en los datos
+  const yearCount = {};
+  for (const r of combined) {
+    yearCount[r.year] = (yearCount[r.year] || 0) + 1;
+  }
+  detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
+
+  return combined.filter(r => r.year === detectedYear);
+}
+
+function parseSheetIngresos(ws) {
+  // Convertir a array de arrays para acceso por índice (más robusto que json)
+  const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const rows = [];
+
+  // Encontrar la fila de encabezados buscando "NOMBRE DEL CLIENTE" o "TIPO"
+  let startRow = -1;
+  for (let i = 0; i < Math.min(data.length, 15); i++) {
+    const row = data[i];
+    if (row && row.some(c => c && String(c).toUpperCase().includes('NOMBRE'))) {
+      startRow = i + 1; // datos empiezan en la siguiente fila
+      break;
+    }
+  }
+  if (startRow === -1) startRow = 3; // fallback
+
+  for (let i = startRow; i < data.length; i++) {
+    const row = data[i];
+    if (!row || row.every(c => c === null)) continue;
+
+    const fecha = parseDate(row[7]); // FECHA DE PAGO
+    const tipo  = row[2] ? String(row[2]).trim() : 'Sin tipo';
+    const total = parseFloat(row[6]); // TOTAL
+    const nombre= row[1] ? String(row[1]).trim() : '—';
+
+    if (!fecha || isNaN(total) || total === 0) continue;
+
+    rows.push({
+      fecha,
+      year:         fecha.getFullYear(),
+      mes:          fecha.getMonth(),
+      tipo_registro:'Ingreso',
+      tipo,
+      categoria:    tipo,
+      subcategoria: nombre,
+      monto:        Math.abs(total),
+    });
+  }
+  return rows;
+}
+
+function parseSheetEgresos(ws) {
+  const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const rows = [];
+
+  // Buscar fila de encabezados por "PROVEEDOR"
+  let startRow = -1;
+  for (let i = 0; i < Math.min(data.length, 10); i++) {
+    const row = data[i];
+    if (row && row.some(c => c && String(c).toUpperCase().includes('PROVEEDOR'))) {
+      startRow = i + 1;
+      break;
+    }
+  }
+  if (startRow === -1) startRow = 5; // fallback
+
+  for (let i = startRow; i < data.length; i++) {
+    const row = data[i];
+    if (!row || row.every(c => c === null)) continue;
+
+    const fecha = parseDate(row[5]);  // FECHA FAC.
+    const tipo  = row[2] ? String(row[2]).trim() : 'Sin tipo';
+    const total = parseFloat(row[10]); // TOTAL
+    const prov  = row[1] ? String(row[1]).trim() : '—';
+
+    if (!fecha || isNaN(total) || total === 0) continue;
+
+    rows.push({
+      fecha,
+      year:         fecha.getFullYear(),
+      mes:          fecha.getMonth(),
+      tipo_registro:'Egreso',
+      tipo,
+      categoria:    tipo,
+      subcategoria: prov,
+      monto:        Math.abs(total),
+    });
+  }
+  return rows;
+}
+
+// ══════════════════════════════════════════════════════
+// 3B. PARSER HOJA ÚNICA GENÉRICA
+// ══════════════════════════════════════════════════════
+
 const COL_MAP = {
-  fecha:        ['fecha','date','fec','f.','dia','day','periodo','period'],
-  tipo:         ['tipo','type','clase','class','categoria_tipo','movimiento','mov','naturaleza'],
-  categoria:    ['categoria','categoría','category','cat','rubro','concepto','concept','descripcion','description'],
-  subcategoria: ['subcategoria','subcategoría','subcategory','subcat','subrubro','detalle'],
-  monto:        ['monto','amount','valor','value','importe','total','cantidad','sum','precio'],
+  fecha:      ['fecha','date','fec','dia','day','periodo','fecha de pago','fecha fac'],
+  tipo:       ['tipo','type','clase','movimiento','naturaleza'],
+  categoria:  ['categoria','categoría','category','cat','rubro','concepto','descripcion'],
+  subcategoria:['subcategoria','subcategoría','subcategory','subcat','detalle'],
+  monto:      ['monto','amount','valor','importe','total','cantidad','sum'],
 };
 
 function findCol(headers, aliases) {
@@ -146,135 +238,59 @@ function findCol(headers, aliases) {
   return null;
 }
 
-function normalizeRows(raw) {
-  if (!raw.length) return [];
-  const headers = Object.keys(raw[0]);
+function normalizeSingleSheet(raw) {
+  const headers    = Object.keys(raw[0]);
+  const colFecha   = findCol(headers, COL_MAP.fecha);
+  const colTipo    = findCol(headers, COL_MAP.tipo);
+  const colCat     = findCol(headers, COL_MAP.categoria);
+  const colSubcat  = findCol(headers, COL_MAP.subcategoria);
+  const colMonto   = findCol(headers, COL_MAP.monto);
 
-  // Detectar columnas
-  const colFecha    = findCol(headers, COL_MAP.fecha);
-  const colTipo     = findCol(headers, COL_MAP.tipo);
-  const colCat      = findCol(headers, COL_MAP.categoria);
-  const colSubcat   = findCol(headers, COL_MAP.subcategoria);
-  const colMonto    = findCol(headers, COL_MAP.monto);
-
-  // Columnas mínimas requeridas
-  if (!colFecha) throw new Error('No se encontró columna de Fecha. Verifica los encabezados del Excel.');
-  if (!colMonto) throw new Error('No se encontró columna de Monto. Verifica los encabezados del Excel.');
+  if (!colFecha) throw new Error('No se encontró columna de Fecha.');
+  if (!colMonto) throw new Error('No se encontró columna de Monto.');
 
   const rows = [];
-
   for (const row of raw) {
     try {
-      // ── FECHA ──
-      const rawFecha = row[colFecha];
-      const fecha = parseDate(rawFecha);
+      const fecha = parseDate(row[colFecha]);
       if (!fecha) continue;
-      if (fecha.getFullYear() !== CURRENT_YEAR) continue;
-
-      // ── MONTO ──
-      const rawMonto = row[colMonto];
-      const monto = parseMonto(rawMonto);
+      const monto = parseMonto(row[colMonto]);
       if (isNaN(monto) || monto === 0) continue;
 
-      // ── TIPO ──
-      let tipo = 'Egreso'; // default
+      let tipoReg = 'Egreso';
       if (colTipo && row[colTipo]) {
-        const rawTipo = String(row[colTipo]).toLowerCase().trim();
-        if (
-          rawTipo.includes('ingreso') || rawTipo.includes('income') ||
-          rawTipo.includes('entrada') || rawTipo.includes('credit') ||
-          rawTipo.includes('crédito') || rawTipo === 'in' || rawTipo === '+'
-        ) {
-          tipo = 'Ingreso';
-        } else if (
-          rawTipo.includes('egreso') || rawTipo.includes('gasto') ||
-          rawTipo.includes('expense') || rawTipo.includes('salida') ||
-          rawTipo.includes('debit') || rawTipo.includes('débito') ||
-          rawTipo === 'out' || rawTipo === '-'
-        ) {
-          tipo = 'Egreso';
-        } else {
-          // Si el monto es negativo → egreso, positivo → ingreso
-          tipo = monto >= 0 ? 'Ingreso' : 'Egreso';
-        }
+        const rt = String(row[colTipo]).toLowerCase().trim();
+        if (rt.includes('ingreso')||rt.includes('income')||rt.includes('entrada')||rt==='+'||rt.includes('crédito')) tipoReg = 'Ingreso';
+        else if (rt.includes('egreso')||rt.includes('gasto')||rt.includes('expense')||rt.includes('salida')||rt==='-') tipoReg = 'Egreso';
+        else tipoReg = monto >= 0 ? 'Ingreso' : 'Egreso';
       } else {
-        // Sin columna tipo: inferir por signo del monto
-        tipo = monto >= 0 ? 'Ingreso' : 'Egreso';
+        tipoReg = monto >= 0 ? 'Ingreso' : 'Egreso';
       }
 
-      // ── CATEGORÍA ──
       const cat    = colCat    && row[colCat]    ? String(row[colCat]).trim()    : 'Sin categoría';
       const subcat = colSubcat && row[colSubcat] ? String(row[colSubcat]).trim() : '—';
+      const tipoVal= colTipo   && row[colTipo]   ? String(row[colTipo]).trim()   : tipoReg;
 
       rows.push({
         fecha,
-        mes:   fecha.getMonth(),       // 0-11
-        tipo,
-        categoria:    capitalizar(cat),
-        subcategoria: capitalizar(subcat),
-        monto:        Math.abs(monto), // Siempre positivo
+        year:          fecha.getFullYear(),
+        mes:           fecha.getMonth(),
+        tipo_registro: tipoReg,
+        tipo:          capitalizar(tipoVal),
+        categoria:     capitalizar(cat),
+        subcategoria:  capitalizar(subcat),
+        monto:         Math.abs(monto),
       });
-    } catch (_) {
-      // Fila con error: ignorar y continuar
-    }
+    } catch (_) { /* fila con error: ignorar */ }
   }
 
-  return rows;
-}
+  if (rows.length === 0) return [];
 
-// ── Parsear fecha (Excel serial o string) ──
-function parseDate(val) {
-  if (!val) return null;
-
-  // Ya es Date (SheetJS con cellDates:true)
-  if (val instanceof Date) {
-    return isNaN(val.getTime()) ? null : val;
-  }
-
-  // Número → serial de Excel
-  if (typeof val === 'number') {
-    const d = XLSX.SSF.parse_date_code(val);
-    if (d) return new Date(d.y, d.m - 1, d.d);
-    return null;
-  }
-
-  // String
-  const str = String(val).trim();
-  if (!str) return null;
-
-  // Intentar parse directo
-  const direct = new Date(str);
-  if (!isNaN(direct.getTime())) return direct;
-
-  // Formato DD/MM/YYYY
-  const ddmmyyyy = str.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
-  if (ddmmyyyy) {
-    const d = new Date(+ddmmyyyy[3], +ddmmyyyy[2] - 1, +ddmmyyyy[1]);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  // Formato YYYY/MM/DD
-  const yyyymmdd = str.match(/^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})$/);
-  if (yyyymmdd) {
-    const d = new Date(+yyyymmdd[1], +yyyymmdd[2] - 1, +yyyymmdd[3]);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  return null;
-}
-
-// ── Parsear monto (quitar $, comas, espacios) ──
-function parseMonto(val) {
-  if (val === null || val === undefined || val === '') return NaN;
-  if (typeof val === 'number') return val;
-  const cleaned = String(val).replace(/[\$\s,]/g, '').replace(/[()]/g, m => m === '(' ? '-' : '');
-  return parseFloat(cleaned);
-}
-
-// ── Capitalizar primera letra ──
-function capitalizar(str) {
-  if (!str || str === '—') return str;
-  return str.charAt(0).toUpperCase() + str.slice(1);
+  // Auto-detectar año
+  const yearCount = {};
+  for (const r of rows) yearCount[r.year] = (yearCount[r.year] || 0) + 1;
+  detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
+  return rows.filter(r => r.year === detectedYear);
 }
 
 // ══════════════════════════════════════════════════════
@@ -283,290 +299,242 @@ function capitalizar(str) {
 
 function buildDashboard(rows) {
   filteredRows = rows;
-
-  // KPIs
   renderKPIs(rows);
-
-  // Gráficas
   renderBarChart(rows);
   renderDonutChart(rows);
-
-  // Tablas
+  renderTipoCharts(rows);
   renderCategoryTable(rows);
   renderTxTable(rows);
-
-  // Filtro por mes
   buildMonthFilter(rows);
 
-  // Mostrar dashboard
   hideLoading();
   document.getElementById('uploadSection').classList.add('hidden');
   document.getElementById('dashboardSection').classList.remove('hidden');
-  document.getElementById('dashSubtitle').textContent = `Año ${CURRENT_YEAR}`;
+  document.getElementById('dashSubtitle').textContent = `Año ${detectedYear}`;
   document.getElementById('monthFilterWrapper').classList.remove('hidden');
   document.getElementById('exportCsvBtn').classList.remove('hidden');
-
-  // Scroll suave al top
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // ── KPIs ──
 function renderKPIs(rows) {
-  const ingresos = rows.filter(r => r.tipo === 'Ingreso');
-  const egresos  = rows.filter(r => r.tipo === 'Egreso');
+  const ing = rows.filter(r => r.tipo_registro === 'Ingreso');
+  const egr = rows.filter(r => r.tipo_registro === 'Egreso');
+  const totalIng = ing.reduce((s,r) => s + r.monto, 0);
+  const totalEgr = egr.reduce((s,r) => s + r.monto, 0);
+  const balance  = totalIng - totalEgr;
+  const tasa     = totalIng > 0 ? (balance / totalIng * 100) : 0;
 
-  const totalIngresos = ingresos.reduce((s, r) => s + r.monto, 0);
-  const totalEgresos  = egresos.reduce((s, r)  => s + r.monto, 0);
-  const balance       = totalIngresos - totalEgresos;
-  const tasa          = totalIngresos > 0 ? ((balance / totalIngresos) * 100) : 0;
-
-  document.getElementById('kpiIncome').textContent        = formatMoney(totalIngresos);
-  document.getElementById('kpiIncomeDetail').textContent  = `${ingresos.length} transacciones`;
-  document.getElementById('kpiExpense').textContent       = formatMoney(totalEgresos);
-  document.getElementById('kpiExpenseDetail').textContent = `${egresos.length} transacciones`;
+  document.getElementById('kpiIncome').textContent        = formatMoney(totalIng);
+  document.getElementById('kpiIncomeDetail').textContent  = `${ing.length} transacciones`;
+  document.getElementById('kpiExpense').textContent       = formatMoney(totalEgr);
+  document.getElementById('kpiExpenseDetail').textContent = `${egr.length} transacciones`;
   document.getElementById('kpiBalance').textContent       = formatMoney(balance);
   document.getElementById('kpiBalanceDetail').textContent = balance >= 0 ? '✓ Balance positivo' : '⚠ Balance negativo';
+  document.getElementById('kpiBalance').style.color       = balance >= 0 ? 'var(--income)' : 'var(--expense)';
   document.getElementById('kpiRate').textContent          = `${tasa.toFixed(1)}%`;
-
-  // Color del balance
-  const balanceCard = document.getElementById('kpiBalance').closest('.kpi-card');
-  balanceCard.style.setProperty('--bal-color', balance >= 0 ? 'var(--income)' : 'var(--expense)');
-  document.getElementById('kpiBalance').style.color = balance >= 0 ? 'var(--income)' : 'var(--expense)';
 }
 
-// ── Gráfica de barras ──
+// ── Barras: Ingresos vs Egresos por mes ──
 function renderBarChart(rows) {
-  const meses    = Array.from({ length: 12 }, () => ({ ingreso: 0, egreso: 0 }));
-  const mesConDatos = new Set();
-
+  const meses = Array.from({length:12}, ()=>({ing:0, egr:0}));
+  const conDatos = new Set();
   for (const r of rows) {
-    meses[r.mes][r.tipo === 'Ingreso' ? 'ingreso' : 'egreso'] += r.monto;
-    mesConDatos.add(r.mes);
+    meses[r.mes][r.tipo_registro==='Ingreso'?'ing':'egr'] += r.monto;
+    conDatos.add(r.mes);
   }
+  const sorted   = [...conDatos].sort((a,b)=>a-b);
+  const labels   = sorted.map(m => MONTHS_ES[m]);
+  const ingData  = sorted.map(m => meses[m].ing);
+  const egrData  = sorted.map(m => meses[m].egr);
 
-  // Solo mostrar meses con datos
-  const labels = [...mesConDatos].sort((a, b) => a - b).map(m => MONTHS_ES[m]);
-  const incomeData  = [...mesConDatos].sort((a,b)=>a-b).map(m => meses[m].ingreso);
-  const expenseData = [...mesConDatos].sort((a,b)=>a-b).map(m => meses[m].egreso);
-
-  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  const gridColor = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
-  const textColor = isDark ? '#64748b' : '#94a3b8';
-
-  const ctx = document.getElementById('barChart').getContext('2d');
+  const isDark   = document.documentElement.getAttribute('data-theme') !== 'light';
+  const grid     = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+  const tick     = isDark ? '#64748b' : '#94a3b8';
+  const ctx      = document.getElementById('barChart').getContext('2d');
 
   if (barChartInst) barChartInst.destroy();
-
   barChartInst = new Chart(ctx, {
     type: 'bar',
     data: {
       labels,
       datasets: [
-        {
-          label: 'Ingresos',
-          data: incomeData,
-          backgroundColor: 'rgba(16,185,129,0.75)',
-          borderColor:     'rgba(16,185,129,1)',
-          borderWidth: 0,
-          borderRadius: 6,
-          borderSkipped: false,
-        },
-        {
-          label: 'Egresos',
-          data: expenseData,
-          backgroundColor: 'rgba(244,63,94,0.75)',
-          borderColor:     'rgba(244,63,94,1)',
-          borderWidth: 0,
-          borderRadius: 6,
-          borderSkipped: false,
-        },
+        { label:'Ingresos', data:ingData, backgroundColor:'rgba(16,185,129,0.75)', borderRadius:6, borderSkipped:false },
+        { label:'Egresos',  data:egrData, backgroundColor:'rgba(244,63,94,0.75)',  borderRadius:6, borderSkipped:false },
       ],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: isDark ? '#1e293b' : '#fff',
-          titleColor: isDark ? '#f1f5f9' : '#0f172a',
-          bodyColor:  isDark ? '#94a3b8' : '#475569',
-          borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
-          borderWidth: 1,
-          padding: 12,
-          cornerRadius: 10,
-          callbacks: {
-            label: ctx => ` ${ctx.dataset.label}: ${formatMoney(ctx.parsed.y)}`,
-          },
-        },
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:false},
+        tooltip: tooltipDefaults(isDark, v => formatMoney(v)),
       },
-      scales: {
-        x: {
-          grid: { display: false },
-          ticks: { color: textColor, font: { family: 'Inter', size: 12 } },
-        },
-        y: {
-          grid: { color: gridColor },
-          ticks: {
-            color: textColor,
-            font: { family: 'Inter', size: 12 },
-            callback: v => formatMoneyShort(v),
-          },
-          border: { display: false },
-        },
+      scales:{
+        x:{grid:{display:false}, ticks:{color:tick, font:{family:'Inter',size:12}}},
+        y:{grid:{color:grid}, border:{display:false},
+           ticks:{color:tick, font:{family:'Inter',size:12}, callback:v=>formatMoneyShort(v)}},
       },
     },
   });
 }
 
-// ── Gráfica dona ──
+// ── Dona: Egresos por tipo ──
 function renderDonutChart(rows) {
-  const egresos = rows.filter(r => r.tipo === 'Egreso');
-  const bycat   = agruparPorCategoria(egresos);
-  const sorted  = Object.entries(bycat).sort((a,b) => b[1] - a[1]).slice(0, 10);
+  const egr      = rows.filter(r => r.tipo_registro === 'Egreso');
+  const byTipo   = agrupar(egr, 'tipo');
+  const sorted   = Object.entries(byTipo).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  const total    = egr.reduce((s,r)=>s+r.monto,0);
 
-  const labels  = sorted.map(([cat]) => cat);
-  const data    = sorted.map(([,val]) => val);
-  const colors  = labels.map((_, i) => PALETTE[i % PALETTE.length]);
-
-  const totalEgresos = egresos.reduce((s, r) => s + r.monto, 0);
-  document.getElementById('donutTotal').textContent = formatMoney(totalEgresos);
+  document.getElementById('donutTotal').textContent = formatMoney(total);
 
   const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  const ctx = document.getElementById('donutChart').getContext('2d');
-
+  const ctx    = document.getElementById('donutChart').getContext('2d');
   if (donutChartInst) donutChartInst.destroy();
-
   donutChartInst = new Chart(ctx, {
-    type: 'doughnut',
-    data: {
-      labels,
-      datasets: [{
-        data,
-        backgroundColor: colors,
-        borderColor:     isDark ? '#1e293b' : '#fff',
-        borderWidth: 3,
-        hoverOffset: 6,
+    type:'doughnut',
+    data:{
+      labels: sorted.map(([t])=>t),
+      datasets:[{
+        data:   sorted.map(([,v])=>v),
+        backgroundColor: sorted.map((_,i)=>PALETTE[i%PALETTE.length]),
+        borderColor: isDark?'#1e293b':'#fff', borderWidth:3, hoverOffset:6,
       }],
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: '72%',
-      plugins: {
-        legend: {
-          position: 'bottom',
-          labels: {
-            color: isDark ? '#94a3b8' : '#475569',
-            font: { family: 'Inter', size: 11 },
-            padding: 12,
-            boxWidth: 10,
-            boxHeight: 10,
-            usePointStyle: true,
-            pointStyleWidth: 10,
-          },
-        },
-        tooltip: {
-          backgroundColor: isDark ? '#1e293b' : '#fff',
-          titleColor: isDark ? '#f1f5f9' : '#0f172a',
-          bodyColor:  isDark ? '#94a3b8' : '#475569',
-          borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
-          borderWidth: 1,
-          padding: 12,
-          cornerRadius: 10,
-          callbacks: {
-            label: ctx => {
-              const pct = totalEgresos > 0
-                ? ((ctx.parsed / totalEgresos) * 100).toFixed(1)
-                : '0.0';
-              return ` ${ctx.label}: ${formatMoney(ctx.parsed)} (${pct}%)`;
-            },
-          },
-        },
+    options:{
+      responsive:true, maintainAspectRatio:false, cutout:'72%',
+      plugins:{
+        legend:{position:'bottom', labels:{color:isDark?'#94a3b8':'#475569', font:{family:'Inter',size:11}, padding:12, boxWidth:10, usePointStyle:true}},
+        tooltip: tooltipDefaults(isDark, (v,ctx2)=>{
+          const pct = total>0 ? (v/total*100).toFixed(1) : '0';
+          return ` ${ctx2.label}: ${formatMoney(v)} (${pct}%)`;
+        }, true),
       },
     },
   });
 }
 
-// ── Tabla de categorías ──
+// ── Barras horizontales: Ingresos Y Egresos por tipo ──
+function renderTipoCharts(rows) {
+  renderTipoBar(
+    rows.filter(r => r.tipo_registro === 'Ingreso'),
+    'tipoIngChart',
+    'rgba(16,185,129,0.8)',
+    'tipoIngBadge'
+  );
+  renderTipoBar(
+    rows.filter(r => r.tipo_registro === 'Egreso'),
+    'tipoEgrChart',
+    'rgba(244,63,94,0.8)',
+    'tipoEgrBadge'
+  );
+}
+
+function renderTipoBar(rows, canvasId, color, badgeId) {
+  const byTipo = agrupar(rows, 'tipo');
+  const sorted = Object.entries(byTipo).sort((a,b)=>b[1]-a[1]);
+  const labels = sorted.map(([t])=>t);
+  const data   = sorted.map(([,v])=>v);
+
+  document.getElementById(badgeId).textContent = `${sorted.length} tipos`;
+
+  // Altura dinámica: 36px por barra + 40px padding, mínimo 220px
+  const dynamicHeight = Math.max(220, sorted.length * 36 + 40);
+  const wrapper = document.getElementById(canvasId).parentElement;
+  wrapper.style.height = dynamicHeight + 'px';
+
+  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+  const grid   = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+  const tick   = isDark ? '#64748b' : '#94a3b8';
+
+  const existingChart = Chart.getChart(canvasId);
+  if (existingChart) existingChart.destroy();
+
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  new Chart(ctx, {
+    type:'bar',
+    data:{
+      labels,
+      datasets:[{
+        data,
+        backgroundColor: color,
+        borderRadius:5,
+        borderSkipped:false,
+      }],
+    },
+    options:{
+      indexAxis:'y',
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip: tooltipDefaults(isDark, v => formatMoney(v)),
+      },
+      scales:{
+        x:{grid:{color:grid}, border:{display:false},
+           ticks:{color:tick, font:{family:'Inter',size:11}, callback:v=>formatMoneyShort(v)}},
+        y:{grid:{display:false}, ticks:{color:isDark?'#94a3b8':'#475569', font:{family:'Inter',size:11}}},
+      },
+    },
+  });
+}
+
+// ── Tabla de categorías/tipos ──
 function renderCategoryTable(rows) {
-  const egresos      = rows.filter(r => r.tipo === 'Egreso');
-  const ingresos     = rows.filter(r => r.tipo === 'Ingreso');
-  const totalEgresos = egresos.reduce((s,r) => s + r.monto, 0);
+  const egr      = rows.filter(r => r.tipo_registro === 'Egreso');
+  const ing      = rows.filter(r => r.tipo_registro === 'Ingreso');
+  const totalEgr = egr.reduce((s,r)=>s+r.monto,0);
 
-  const byCatE = agruparPorCategoria(egresos);
-  const byCatI = agruparPorCategoria(ingresos);
-  const contE  = contarPorCategoria(egresos);
-  const contI  = contarPorCategoria(ingresos);
+  const byCatE = agrupar(egr,'tipo');
+  const byCatI = agrupar(ing,'tipo');
+  const cntE   = contar(egr,'tipo');
+  const cntI   = contar(ing,'tipo');
 
-  // Combinar todas las categorías
   const allCats = new Set([...Object.keys(byCatE), ...Object.keys(byCatI)]);
   const entries = [];
-
   for (const cat of allCats) {
-    if (byCatE[cat]) entries.push({ cat, tipo: 'Egreso',  total: byCatE[cat], count: contE[cat] || 0 });
-    if (byCatI[cat]) entries.push({ cat, tipo: 'Ingreso', total: byCatI[cat], count: contI[cat] || 0 });
+    if (byCatE[cat]) entries.push({cat, tipo:'Egreso',  total:byCatE[cat], count:cntE[cat]||0});
+    if (byCatI[cat]) entries.push({cat, tipo:'Ingreso', total:byCatI[cat], count:cntI[cat]||0});
   }
-
-  // Ordenar por total descendente
-  entries.sort((a,b) => b.total - a.total);
+  entries.sort((a,b)=>b.total-a.total);
 
   const tbody = document.getElementById('categoryTableBody');
   tbody.innerHTML = '';
-
   for (const e of entries) {
-    const pct = (e.tipo === 'Egreso' && totalEgresos > 0)
-      ? ((e.total / totalEgresos) * 100)
-      : null;
-
-    const tr = document.createElement('tr');
+    const pct = (e.tipo==='Egreso' && totalEgr>0) ? (e.total/totalEgr*100) : null;
+    const tr  = document.createElement('tr');
     tr.innerHTML = `
       <td><strong style="color:var(--text-1)">${escHtml(e.cat)}</strong></td>
-      <td><span class="type-badge ${e.tipo === 'Ingreso' ? 'type-income' : 'type-expense'}">${e.tipo}</span></td>
+      <td><span class="type-badge ${e.tipo==='Ingreso'?'type-income':'type-expense'}">${e.tipo}</span></td>
       <td class="text-right" style="color:var(--text-1);font-weight:600">${formatMoney(e.total)}</td>
       <td class="text-right">
-        ${pct !== null
-          ? `<div class="progress-cell">
-               <span>${pct.toFixed(1)}%</span>
-               <div class="progress-bar">
-                 <div class="progress-fill" style="width:${Math.min(pct,100)}%"></div>
-               </div>
-             </div>`
-          : '<span style="color:var(--text-3)">—</span>'
-        }
+        ${pct!==null
+          ? `<div class="progress-cell"><span>${pct.toFixed(1)}%</span>
+             <div class="progress-bar"><div class="progress-fill" style="width:${Math.min(pct,100)}%"></div></div></div>`
+          : '<span style="color:var(--text-3)">—</span>'}
       </td>
-      <td class="text-right">${e.count}</td>
-    `;
+      <td class="text-right">${e.count}</td>`;
     tbody.appendChild(tr);
   }
-
   document.getElementById('tableBadge').textContent = `${entries.length} categorías`;
 }
 
-// ── Tabla de últimas transacciones (máx. 100) ──
+// ── Tabla de transacciones ──
 function renderTxTable(rows) {
-  const sorted = [...rows]
-    .sort((a,b) => b.fecha - a.fecha)
-    .slice(0, 100);
-
-  const tbody = document.getElementById('txTableBody');
+  const sorted = [...rows].sort((a,b)=>b.fecha-a.fecha).slice(0,100);
+  const tbody  = document.getElementById('txTableBody');
   tbody.innerHTML = '';
-
   for (const r of sorted) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${formatDate(r.fecha)}</td>
-      <td><span class="type-badge ${r.tipo === 'Ingreso' ? 'type-income' : 'type-expense'}">${r.tipo}</span></td>
-      <td>${escHtml(r.categoria)}</td>
+      <td><span class="type-badge ${r.tipo_registro==='Ingreso'?'type-income':'type-expense'}">${r.tipo_registro}</span></td>
+      <td><strong style="color:var(--text-1)">${escHtml(r.tipo)}</strong></td>
       <td style="color:var(--text-3)">${escHtml(r.subcategoria)}</td>
-      <td class="text-right" style="color:${r.tipo==='Ingreso'?'var(--income)':'var(--expense)'};font-weight:600">
-        ${r.tipo==='Ingreso'?'+':'-'}${formatMoney(r.monto)}
-      </td>
-    `;
+      <td class="text-right" style="color:${r.tipo_registro==='Ingreso'?'var(--income)':'var(--expense)'};font-weight:600">
+        ${r.tipo_registro==='Ingreso'?'+':'-'}${formatMoney(r.monto)}
+      </td>`;
     tbody.appendChild(tr);
   }
-
   document.getElementById('txBadge').textContent = `${sorted.length} registros`;
 }
 
@@ -575,35 +543,26 @@ function renderTxTable(rows) {
 // ══════════════════════════════════════════════════════
 
 function buildMonthFilter(rows) {
-  const meses = [...new Set(rows.map(r => r.mes))].sort((a,b)=>a-b);
+  const meses = [...new Set(rows.map(r=>r.mes))].sort((a,b)=>a-b);
   const sel   = document.getElementById('monthFilter');
-
-  // Limpiar opciones previas (excepto "Todos")
   while (sel.options.length > 1) sel.remove(1);
-
   for (const m of meses) {
     const opt = document.createElement('option');
-    opt.value = m;
-    opt.textContent = MONTHS_LONG[m];
+    opt.value = m; opt.textContent = MONTHS_LONG[m];
     sel.appendChild(opt);
   }
-
-  // Listener
   sel.onchange = () => applyMonthFilter(sel.value);
 }
 
 function applyMonthFilter(val) {
-  filteredRows = val === 'all'
-    ? allRows
-    : allRows.filter(r => r.mes === parseInt(val, 10));
-
+  filteredRows = val==='all' ? allRows : allRows.filter(r=>r.mes===parseInt(val,10));
   renderKPIs(filteredRows);
   renderBarChart(filteredRows);
   renderDonutChart(filteredRows);
+  renderTipoCharts(filteredRows);
   renderCategoryTable(filteredRows);
   renderTxTable(filteredRows);
-
-  const label = val === 'all' ? `Año ${CURRENT_YEAR}` : `${MONTHS_LONG[parseInt(val,10)]} ${CURRENT_YEAR}`;
+  const label = val==='all' ? `Año ${detectedYear}` : `${MONTHS_LONG[parseInt(val,10)]} ${detectedYear}`;
   document.getElementById('dashSubtitle').textContent = label;
 }
 
@@ -612,29 +571,20 @@ function applyMonthFilter(val) {
 // ══════════════════════════════════════════════════════
 
 function exportCSV() {
-  const rows = filteredRows;
-  const header = ['Fecha','Tipo','Categoría','Subcategoría','Monto'];
+  const header = ['Fecha','Tipo','Categoría/Tipo','Proveedor/Cliente','Monto'];
   const lines  = [header.join(',')];
-
-  for (const r of rows) {
+  for (const r of filteredRows) {
     lines.push([
-      formatDate(r.fecha),
-      r.tipo,
-      `"${r.categoria}"`,
-      `"${r.subcategoria}"`,
-      r.monto.toFixed(2),
+      formatDate(r.fecha), r.tipo_registro,
+      `"${r.tipo}"`, `"${r.subcategoria}"`, r.monto.toFixed(2),
     ].join(','));
   }
-
-  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `findash_${CURRENT_YEAR}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  a.href=url; a.download=`findash_${detectedYear}.csv`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
 // ══════════════════════════════════════════════════════
@@ -642,46 +592,39 @@ function exportCSV() {
 // ══════════════════════════════════════════════════════
 
 function toggleTheme() {
-  const html = document.documentElement;
-  const isDark = html.getAttribute('data-theme') === 'dark';
-  html.setAttribute('data-theme', isDark ? 'light' : 'dark');
-
-  document.getElementById('iconSun').classList.toggle('hidden', !isDark);
-  document.getElementById('iconMoon').classList.toggle('hidden', isDark);
-
-  // Re-renderizar gráficas con colores actualizados
+  const html   = document.documentElement;
+  const isDark = html.getAttribute('data-theme')==='dark';
+  html.setAttribute('data-theme', isDark?'light':'dark');
+  document.getElementById('iconSun').classList.toggle('hidden',!isDark);
+  document.getElementById('iconMoon').classList.toggle('hidden',isDark);
   if (allRows.length > 0) {
     renderBarChart(filteredRows);
     renderDonutChart(filteredRows);
+    renderTipoCharts(filteredRows);
   }
 }
 
 // ══════════════════════════════════════════════════════
-// 8. RESET / NUEVO ARCHIVO
+// 8. RESET
 // ══════════════════════════════════════════════════════
 
 function resetApp() {
-  allRows = [];
-  filteredRows = [];
-
-  // Ocultar dashboard
+  allRows=[]; filteredRows=[];
   document.getElementById('dashboardSection').classList.add('hidden');
   document.getElementById('monthFilterWrapper').classList.add('hidden');
   document.getElementById('exportCsvBtn').classList.add('hidden');
-
-  // Mostrar upload
   document.getElementById('uploadSection').classList.remove('hidden');
-  document.getElementById('monthFilter').value = 'all';
-
-  // Reset input file
-  document.getElementById('fileInput').value = '';
-
-  // Destruir gráficas
-  if (barChartInst)   { barChartInst.destroy();   barChartInst   = null; }
-  if (donutChartInst) { donutChartInst.destroy(); donutChartInst = null; }
-
+  document.getElementById('monthFilter').value='all';
+  document.getElementById('fileInput').value='';
+  [barChartInst,donutChartInst].forEach(c=>{if(c){c.destroy();}});
+  barChartInst=donutChartInst=null;
+  // Destruir charts de tipo
+  ['tipoIngChart','tipoEgrChart'].forEach(id=>{
+    const c = Chart.getChart(id);
+    if(c) c.destroy();
+  });
   hideError();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo({top:0,behavior:'smooth'});
 }
 
 // ══════════════════════════════════════════════════════
@@ -692,70 +635,85 @@ function showLoading() {
   document.getElementById('uploadSection').classList.add('hidden');
   document.getElementById('loadingSection').classList.remove('hidden');
 }
-function hideLoading() {
-  document.getElementById('loadingSection').classList.add('hidden');
-}
+function hideLoading() { document.getElementById('loadingSection').classList.add('hidden'); }
 function showError(msg) {
-  const el = document.getElementById('errorMsg');
   document.getElementById('errorText').textContent = msg;
-  el.classList.remove('hidden');
+  document.getElementById('errorMsg').classList.remove('hidden');
   document.getElementById('uploadSection').classList.remove('hidden');
   hideLoading();
 }
-function hideError() {
-  document.getElementById('errorMsg').classList.add('hidden');
-}
+function hideError() { document.getElementById('errorMsg').classList.add('hidden'); }
 
 // ══════════════════════════════════════════════════════
 // 10. HELPERS DE DATOS
 // ══════════════════════════════════════════════════════
 
-function agruparPorCategoria(rows) {
-  return rows.reduce((acc, r) => {
-    acc[r.categoria] = (acc[r.categoria] || 0) + r.monto;
-    return acc;
-  }, {});
+function agrupar(rows, key) {
+  return rows.reduce((acc,r)=>{ acc[r[key]]=(acc[r[key]]||0)+r.monto; return acc; },{});
+}
+function contar(rows, key) {
+  return rows.reduce((acc,r)=>{ acc[r[key]]=(acc[r[key]]||0)+1; return acc; },{});
 }
 
-function contarPorCategoria(rows) {
-  return rows.reduce((acc, r) => {
-    acc[r.categoria] = (acc[r.categoria] || 0) + 1;
-    return acc;
-  }, {});
+// ── Parsear fecha ──
+function parseDate(val) {
+  if (!val) return null;
+  if (val instanceof Date) return isNaN(val.getTime())?null:val;
+  if (typeof val==='number') {
+    const d = XLSX.SSF.parse_date_code(val);
+    return d ? new Date(d.y,d.m-1,d.d) : null;
+  }
+  const str = String(val).trim();
+  if (!str) return null;
+  const direct = new Date(str);
+  if (!isNaN(direct.getTime())) return direct;
+  const ddmm = str.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+  if (ddmm) { const d=new Date(+ddmm[3],+ddmm[2]-1,+ddmm[1]); if(!isNaN(d))return d; }
+  const yyyymm = str.match(/^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})$/);
+  if (yyyymm) { const d=new Date(+yyyymm[1],+yyyymm[2]-1,+yyyymm[3]); if(!isNaN(d))return d; }
+  return null;
 }
 
-// ── Formatear dinero ──
+function parseMonto(val) {
+  if (val===null||val===undefined||val==='') return NaN;
+  if (typeof val==='number') return val;
+  const c = String(val).replace(/[\$\s,]/g,'').replace(/[()]/g,m=>m==='('?'-':'');
+  return parseFloat(c);
+}
+
+function capitalizar(s) {
+  if (!s||s==='—') return s;
+  return s.charAt(0).toUpperCase()+s.slice(1);
+}
+
 function formatMoney(n) {
-  return new Intl.NumberFormat('es-MX', {
-    style: 'currency',
-    currency: 'MXN',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(n);
+  return new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN',minimumFractionDigits:0,maximumFractionDigits:0}).format(n);
 }
-
-// ── Formatear dinero corto para ejes (10K, 1M) ──
 function formatMoneyShort(n) {
-  if (Math.abs(n) >= 1_000_000) return `$${(n/1_000_000).toFixed(1)}M`;
-  if (Math.abs(n) >= 1_000)     return `$${(n/1_000).toFixed(0)}K`;
-  return `$${n}`;
+  if(Math.abs(n)>=1_000_000)return`$${(n/1_000_000).toFixed(1)}M`;
+  if(Math.abs(n)>=1_000)return`$${(n/1_000).toFixed(0)}K`;
+  return`$${n}`;
 }
-
-// ── Formatear fecha ──
 function formatDate(d) {
-  return d.toLocaleDateString('es-MX', {
-    day:   '2-digit',
-    month: 'short',
-    year:  'numeric',
-  });
+  return d.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'});
+}
+function escHtml(s) {
+  if(!s)return'';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Escape HTML ──
-function escHtml(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
+// Opciones base para tooltips de Chart.js
+function tooltipDefaults(isDark, labelFn, isDonut=false) {
+  return {
+    backgroundColor: isDark?'#1e293b':'#fff',
+    titleColor:      isDark?'#f1f5f9':'#0f172a',
+    bodyColor:       isDark?'#94a3b8':'#475569',
+    borderColor:     isDark?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.1)',
+    borderWidth:1, padding:12, cornerRadius:10,
+    callbacks: {
+      label: isDonut
+        ? ctx => labelFn(ctx.parsed, ctx)
+        : ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.parsed.y ?? ctx.parsed)}`,
+    },
+  };
 }
