@@ -527,7 +527,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 280px;
+  height: 300px;
 }
 .donut-center {
   position: absolute;
@@ -739,6 +739,231 @@ body {
   position: relative;
   overflow: hidden;
 }
+
+/* ══════════════════════════════════════════════════════
+   TABLA AVANZADA DE TRANSACCIONES
+══════════════════════════════════════════════════════ */
+
+/* Wrapper con scroll horizontal */
+.tx-table-wrapper {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 520px;
+}
+
+/* Tabla */
+.tx-enhanced-table {
+  min-width: 900px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.tx-enhanced-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg-3);
+}
+.tx-enhanced-table th {
+  background: var(--bg-3);
+  white-space: nowrap;
+  padding: 12px 14px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border-2);
+  vertical-align: middle;
+}
+.tx-enhanced-table th .th-label {
+  margin-right: 4px;
+}
+
+/* Celdas */
+.tx-enhanced-table td {
+  padding: 9px 14px;
+  font-size: 0.82rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.td-tipo { color: var(--text-1); }
+.td-nombre { color: var(--text-3); max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.td-date { color: var(--text-2); }
+.td-num { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.td-total { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* Hover */
+.tx-enhanced-table tbody tr:hover td { background: var(--bg-3); }
+
+/* ── Botón de filtro en encabezado ── */
+.tx-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 0;
+  transition: var(--transition);
+  vertical-align: middle;
+}
+.tx-filter-btn:hover { background: var(--border-2); color: var(--text-1); }
+.tx-filter-btn.active {
+  color: var(--accent);
+  background: rgba(99,102,241,0.15);
+}
+.tx-filter-btn.active svg { stroke: var(--accent); }
+
+/* ── Fila de totales (tfoot) ── */
+.tx-totals-row td {
+  background: var(--bg-3) !important;
+  border-top: 2px solid var(--border-2);
+  border-bottom: none;
+  padding: 11px 14px;
+}
+.tx-foot-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.tx-foot-num {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.tx-foot-total {
+  color: var(--text-1) !important;
+  font-size: 0.88rem;
+}
+
+/* ══════════════════════════════════════════════════════
+   DROPDOWN PANEL DE FILTRO (posicionado absoluto)
+══════════════════════════════════════════════════════ */
+.tx-dropdown-panel {
+  position: absolute;
+  z-index: 9999;
+  width: 260px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+  overflow: hidden;
+  font-family: 'Inter', system-ui, sans-serif;
+  animation: fadeInDown 0.12s ease;
+}
+@keyframes fadeInDown {
+  from { opacity:0; transform:translateY(-4px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+
+.tx-dp-head {
+  padding: 10px 10px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.tx-dp-search {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  color: var(--text-1);
+  font-size: 0.8rem;
+  font-family: inherit;
+  outline: none;
+  margin-bottom: 6px;
+}
+.tx-dp-search:focus { border-color: var(--accent); }
+.tx-dp-actions {
+  display: flex;
+  gap: 8px;
+}
+.tx-dp-actions button {
+  flex: 1;
+  padding: 4px;
+  background: transparent;
+  border: 1px solid var(--border-2);
+  border-radius: 5px;
+  color: var(--text-2);
+  font-size: 0.72rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.tx-dp-actions button:hover { background: var(--border); color: var(--text-1); }
+
+.tx-dp-list {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.tx-dp-list::-webkit-scrollbar { width: 4px; }
+.tx-dp-list::-webkit-scrollbar-track { background: transparent; }
+.tx-dp-list::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
+
+.tx-dp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-2);
+  transition: background 0.1s;
+  user-select: none;
+}
+.tx-dp-item:hover { background: var(--bg-3); color: var(--text-1); }
+.tx-dp-item input[type="checkbox"] {
+  width: 14px; height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.tx-dp-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tx-dp-foot {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+.tx-dp-btn-apply {
+  flex: 1;
+  padding: 7px;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 0.8rem;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.tx-dp-btn-apply:hover { background: var(--accent-2); }
+.tx-dp-btn-clear {
+  padding: 7px 10px;
+  background: transparent;
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.tx-dp-btn-clear:hover { background: var(--border); color: var(--expense); border-color: var(--expense); }
 
 /* ─── RESPONSIVE ─────────────────────────────────────── */
 @media (max-width: 640px) {
