@@ -527,15 +527,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 300px;
+  /* Más altura para acomodar leyenda inferior y el anillo bien proporcionado */
+  height: 360px;
 }
-.donut-center {
-  position: absolute;
-  top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
-  text-align: center;
-  pointer-events: none;
-}
+/* .donut-center eliminado — texto central ahora via plugin Chart.js en el canvas */
 .donut-total-label {
   display: block;
   font-size: 0.75rem;
@@ -848,7 +843,7 @@ body {
    DROPDOWN PANEL DE FILTRO (posicionado absoluto)
 ══════════════════════════════════════════════════════ */
 .tx-dropdown-panel {
-  position: absolute;
+  position: fixed;   /* fixed al viewport — nunca se recorta */
   z-index: 9999;
   width: 260px;
   background: var(--bg-2);
@@ -964,6 +959,17 @@ body {
   transition: var(--transition);
 }
 .tx-dp-btn-clear:hover { background: var(--border); color: var(--expense); border-color: var(--expense); }
+
+/* Nota de límite de filas en tabla */
+.tx-limit-note {
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--text-3);
+  padding: 10px 14px !important;
+  font-style: italic;
+  background: var(--bg-3) !important;
+  border-top: 1px dashed var(--border-2);
+}
 
 /* ─── RESPONSIVE ─────────────────────────────────────── */
 @media (max-width: 640px) {
