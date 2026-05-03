@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FinDash — Dashboard Financiero</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ══════════════════════════════════
+       HEADER
+  ══════════════════════════════════ -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect width="28" height="28" rx="8" fill="url(#grad)"/>
+          <path d="M8 18L12 13L15 16L18 11L20 13" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <defs>
+            <linearGradient id="grad" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#6366f1"/>
+              <stop offset="1" stop-color="#8b5cf6"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span class="logo-text">FinDash</span>
+      </div>
+
+      <div class="header-actions">
+        <!-- Filtro por mes (oculto hasta tener datos) -->
+        <div id="monthFilterWrapper" class="month-filter-wrapper hidden">
+          <label for="monthFilter" class="filter-label">Mes</label>
+          <select id="monthFilter" class="filter-select">
+            <option value="all">Todos</option>
+          </select>
+        </div>
+
+        <!-- Botón exportar CSV (oculto hasta tener datos) -->
+        <button id="exportCsvBtn" class="btn btn-ghost hidden" onclick="exportCSV()">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Exportar CSV
+        </button>
+
+        <!-- Toggle Dark/Light -->
+        <button class="btn btn-icon" id="themeToggle" onclick="toggleTheme()" title="Cambiar tema">
+          <svg id="iconSun" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" class="hidden">
+            <circle cx="12" cy="12" r="5"/>
+            <line x1="12" y1="1" x2="12" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="23"/>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+            <line x1="1" y1="12" x2="3" y2="12"/>
+            <line x1="21" y1="12" x2="23" y2="12"/>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+          <svg id="iconMoon" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════
+       ZONA PRINCIPAL
+  ══════════════════════════════════ -->
+  <main class="main">
+
+    <!-- ── UPLOAD ZONE ── -->
+    <section id="uploadSection" class="upload-section">
+      <div class="upload-hero">
+        <div class="upload-badge">Dashboard Financiero Inteligente</div>
+        <h1 class="upload-title">Sube tu Excel.<br/>Obtén claridad financiera.</h1>
+        <p class="upload-subtitle">Analiza tus ingresos y egresos de forma automática. Resultados instantáneos, sin servidores.</p>
+      </div>
+
+      <!-- Drop Zone -->
+      <div
+        id="dropZone"
+        class="drop-zone"
+        ondragover="handleDragOver(event)"
+        ondragleave="handleDragLeave(event)"
+        ondrop="handleDrop(event)"
+        onclick="triggerFileInput()"
+      >
+        <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none" onchange="handleFileChange(event)" />
+
+        <div class="drop-zone-content">
+          <div class="drop-icon">
+            <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="12" y1="18" x2="12" y2="12"/>
+              <polyline points="9 15 12 12 15 15"/>
+            </svg>
+          </div>
+          <p class="drop-main-text">Arrastra tu archivo Excel aquí</p>
+          <p class="drop-sub-text">o haz clic para seleccionarlo</p>
+          <span class="drop-format-badge">.xlsx &nbsp;·&nbsp; .xls</span>
+        </div>
+      </div>
+
+      <!-- Mensaje de error -->
+      <div id="errorMsg" class="error-message hidden">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <span id="errorText"></span>
+      </div>
+
+      <!-- Features row -->
+      <div class="features-row">
+        <div class="feature-pill">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+          Sin servidor
+        </div>
+        <div class="feature-pill">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+          100% privado
+        </div>
+        <div class="feature-pill">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+          Análisis automático
+        </div>
+        <div class="feature-pill">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+          Exportar CSV
+        </div>
+      </div>
+    </section>
+
+    <!-- ── LOADING ── -->
+    <section id="loadingSection" class="loading-section hidden">
+      <div class="loader-card">
+        <div class="spinner"></div>
+        <p class="loader-text">Procesando tu archivo…</p>
+        <p class="loader-sub">Esto solo toma un momento</p>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════
+         DASHBOARD
+    ══════════════════════════════════ -->
+    <section id="dashboardSection" class="dashboard hidden">
+
+      <!-- Sub-header del dashboard -->
+      <div class="dash-header">
+        <div>
+          <h2 class="dash-title">Resumen Financiero</h2>
+          <p class="dash-subtitle" id="dashSubtitle">Año actual</p>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="resetApp()">
+          <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 .49-4.49"/>
+          </svg>
+          Cargar otro archivo
+        </button>
+      </div>
+
+      <!-- ── KPI CARDS ── -->
+      <div class="kpi-grid">
+        <div class="kpi-card kpi-income">
+          <div class="kpi-label">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <line x1="12" y1="19" x2="12" y2="5"/>
+              <polyline points="5 12 12 5 19 12"/>
+            </svg>
+            Total Ingresos
+          </div>
+          <div class="kpi-value" id="kpiIncome">$0</div>
+          <div class="kpi-detail" id="kpiIncomeDetail">0 transacciones</div>
+        </div>
+
+        <div class="kpi-card kpi-expense">
+          <div class="kpi-label">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <polyline points="19 12 12 19 5 12"/>
+            </svg>
+            Total Egresos
+          </div>
+          <div class="kpi-value" id="kpiExpense">$0</div>
+          <div class="kpi-detail" id="kpiExpenseDetail">0 transacciones</div>
+        </div>
+
+        <div class="kpi-card kpi-balance">
+          <div class="kpi-label">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <line x1="12" y1="1" x2="12" y2="23"/>
+              <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+            </svg>
+            Balance Neto
+          </div>
+          <div class="kpi-value" id="kpiBalance">$0</div>
+          <div class="kpi-detail" id="kpiBalanceDetail">—</div>
+        </div>
+
+        <div class="kpi-card kpi-rate">
+          <div class="kpi-label">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+            </svg>
+            Tasa de Ahorro
+          </div>
+          <div class="kpi-value" id="kpiRate">0%</div>
+          <div class="kpi-detail" id="kpiRateDetail">Del total de ingresos</div>
+        </div>
+      </div>
+
+      <!-- ── CHARTS ROW ── -->
+      <div class="charts-grid">
+
+        <!-- Gráfica barras: Ingresos vs Egresos por mes -->
+        <div class="chart-card chart-bar-card">
+          <div class="chart-header">
+            <h3 class="chart-title">Ingresos vs Egresos por Mes</h3>
+            <div class="chart-legend">
+              <span class="legend-dot legend-income"></span><span>Ingresos</span>
+              <span class="legend-dot legend-expense"></span><span>Egresos</span>
+            </div>
+          </div>
+          <div class="chart-body">
+            <canvas id="barChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Gráfica dona: Egresos por categoría -->
+        <div class="chart-card chart-donut-card">
+          <div class="chart-header">
+            <h3 class="chart-title">Egresos por Categoría</h3>
+          </div>
+          <div class="chart-body donut-body">
+            <canvas id="donutChart"></canvas>
+            <div class="donut-center" id="donutCenter">
+              <span class="donut-total-label">Total</span>
+              <span class="donut-total-value" id="donutTotal">$0</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ── TABLA DE CATEGORÍAS ── -->
+      <div class="table-card">
+        <div class="table-header">
+          <h3 class="chart-title">Desglose por Categoría</h3>
+          <span class="table-badge" id="tableBadge">0 categorías</span>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table" id="categoryTable">
+            <thead>
+              <tr>
+                <th>Categoría</th>
+                <th>Tipo</th>
+                <th class="text-right">Total</th>
+                <th class="text-right">% del gasto</th>
+                <th class="text-right">Transacciones</th>
+              </tr>
+            </thead>
+            <tbody id="categoryTableBody">
+              <!-- Generado por JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── TABLA DETALLE TRANSACCIONES ── -->
+      <div class="table-card">
+        <div class="table-header">
+          <h3 class="chart-title">Últimas Transacciones</h3>
+          <span class="table-badge" id="txBadge">0 registros</span>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table" id="txTable">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Tipo</th>
+                <th>Categoría</th>
+                <th>Subcategoría</th>
+                <th class="text-right">Monto</th>
+              </tr>
+            </thead>
+            <tbody id="txTableBody">
+              <!-- Generado por JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+    <!-- /dashboardSection -->
+
+  </main>
+
+  <!-- ── FOOTER ── -->
+  <footer class="footer">
+    <p>FinDash &nbsp;·&nbsp; Análisis 100% local &nbsp;·&nbsp; Tus datos nunca salen de tu navegador</p>
+  </footer>
+
+  <!-- ══════════════════════════════════
+       LIBRERÍAS EXTERNAS
+  ══════════════════════════════════ -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <script src="script.js"></script>
+
+</body>
+</html>
