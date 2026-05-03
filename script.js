@@ -19,6 +19,11 @@ let donutChartInst = null;
 let tipoBarInst    = null;
 let detectedYear   = new Date().getFullYear();
 
+// ─── ESTADO TABLA DE TRANSACCIONES ────────────────────
+let txCurrentRows  = [];  // filas actuales antes de filtros de columna
+let txColFilters   = {};  // colKey → Set<string> | vacío = sin filtro
+let txOpenCol      = null; // columna cuyo dropdown está abierto
+
 // ─── PALETA ──────────────────────────────────────────
 const PALETTE = [
   '#6366f1','#8b5cf6','#ec4899','#f43f5e',
@@ -182,7 +187,8 @@ function findColIdx(colMap, hints) {
  * Parser principal: strings → filas normalizadas.
  * Recibe el worksheet, el tipo (Ingreso/Egreso) y hints de columnas.
  */
-function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHints) {
+function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHints,
+                           importeHints, ivaHints, retHints) {
   if (!ws) return [];
   const rows = wsToStrings(ws);
   if (!rows.length) return [];
@@ -191,17 +197,20 @@ function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHi
   if (!hdr) return [];
 
   const { headerIdx, colMap } = hdr;
-  const cFecha  = findColIdx(colMap, dateHints);
-  const cTotal  = findColIdx(colMap, totalHints);
-  const cTipo   = findColIdx(colMap, tipoHints);
-  const cNombre = findColIdx(colMap, nameHints);
+  const cFecha   = findColIdx(colMap, dateHints);
+  const cTotal   = findColIdx(colMap, totalHints);
+  const cTipo    = findColIdx(colMap, tipoHints);
+  const cNombre  = findColIdx(colMap, nameHints);
+  const cImporte = importeHints ? findColIdx(colMap, importeHints) : -1;
+  const cIva     = ivaHints     ? findColIdx(colMap, ivaHints)     : -1;
+  const cRet     = retHints     ? findColIdx(colMap, retHints)     : -1;
 
   if (cFecha === -1 || cTotal === -1) return [];
 
   const result = [];
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i];
-    if (!row || !row.some(c => c)) continue; // fila vacía
+    if (!row || !row.some(c => c)) continue;
 
     const rawFecha = row[cFecha] || '';
     const rawTotal = row[cTotal] || '';
@@ -213,8 +222,11 @@ function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHi
     const total = parseMonto(rawTotal);
     if (isNaN(total) || total === 0) continue;
 
-    const tipo   = cTipo   >= 0 && row[cTipo]   ? String(row[cTipo]).trim()   : 'Sin tipo';
-    const nombre = cNombre >= 0 && row[cNombre] ? String(row[cNombre]).trim() : '—';
+    const tipo    = cTipo   >= 0 && row[cTipo]   ? String(row[cTipo]).trim()   : 'Sin tipo';
+    const nombre  = cNombre >= 0 && row[cNombre] ? String(row[cNombre]).trim() : '—';
+    const importe = cImporte >= 0 ? (parseMonto(row[cImporte] || '0') || 0) : Math.abs(total);
+    const iva     = cIva     >= 0 ? (parseMonto(row[cIva]     || '0') || 0) : 0;
+    const ret     = cRet     >= 0 ? (parseMonto(row[cRet]     || '0') || 0) : 0;
 
     result.push({
       fecha,
@@ -225,6 +237,9 @@ function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHi
       categoria:     tipo,
       subcategoria:  nombre,
       monto:         Math.abs(total),
+      importe:       Math.abs(importe),
+      iva:           Math.abs(iva),
+      ret:           Math.abs(ret),
     });
   }
   return result;
@@ -237,18 +252,24 @@ function parseMultiSheet(wb) {
 
   const rowsIng = parseSheetStrings(
     wb.Sheets[nameIng], 'Ingreso',
-    ['FECHA DE PAGO', 'FECHA PAGO', 'FECHA'],  // date hints
-    ['TOTAL'],                                   // amount hints
-    ['TIPO'],                                    // type hints
-    ['NOMBRE DEL CLIENTE', 'NOMBRE CLIENTE', 'NOMBRE'] // name hints
+    ['FECHA DE PAGO', 'FECHA PAGO', 'FECHA'],           // date
+    ['TOTAL'],                                           // total
+    ['TIPO'],                                            // tipo
+    ['NOMBRE DEL CLIENTE', 'NOMBRE CLIENTE', 'NOMBRE'], // nombre
+    ['IMPORTE'],                                         // importe
+    ['IVA'],                                             // iva
+    null                                                 // sin ret en INGRESOS
   );
 
   const rowsEgr = parseSheetStrings(
     wb.Sheets[nameEgr], 'Egreso',
-    ['FECHA FAC', 'FECHA FACTURA', 'FECHA'],    // date hints
-    ['TOTAL'],                                   // amount hints
-    ['TIPO'],                                    // type hints
-    ['PROVEEDOR']                                // name hints
+    ['FECHA FAC', 'FECHA FACTURA', 'FECHA'],            // date
+    ['TOTAL'],                                           // total
+    ['TIPO'],                                            // tipo
+    ['PROVEEDOR'],                                       // nombre
+    ['IMPORTE'],                                         // importe
+    ['IVA'],                                             // iva
+    ['RET', 'RET/ ISR', 'RET/ISR', 'RETENCION']        // ret
   );
 
   const combined = [...rowsIng, ...rowsEgr];
@@ -622,24 +643,208 @@ function renderCategoryTable(rows) {
   document.getElementById('tableBadge').textContent = `${entries.length} categorías`;
 }
 
-// ── Tabla de transacciones ──
+// ══════════════════════════════════════════════════════
+// TABLA AVANZADA DE TRANSACCIONES
+// Columnas filtrable + totales dinámicos
+// ══════════════════════════════════════════════════════
+
+const TX_COLS = [
+  { key:'fecha_str',    label:'Fecha',            align:'left',  filterable:true,  numeric:false },
+  { key:'tipo_registro',label:'Movimiento',       align:'left',  filterable:true,  numeric:false },
+  { key:'tipo',         label:'Tipo',             align:'left',  filterable:true,  numeric:false },
+  { key:'subcategoria', label:'Proveedor / Cliente',align:'left',filterable:true,  numeric:false },
+  { key:'importe',      label:'Importe',          align:'right', filterable:false, numeric:true  },
+  { key:'iva',          label:'IVA',              align:'right', filterable:false, numeric:true  },
+  { key:'ret',          label:'Ret',              align:'right', filterable:false, numeric:true  },
+  { key:'monto',        label:'Total',            align:'right', filterable:false, numeric:true  },
+];
+
+function txGetVal(row, key) {
+  if (key === 'fecha_str') return formatDate(row.fecha);
+  return String(row[key] ?? '');
+}
+
 function renderTxTable(rows) {
-  const sorted = [...rows].sort((a,b)=>b.fecha-a.fecha).slice(0,100);
-  const tbody  = document.getElementById('txTableBody');
+  txCurrentRows = [...rows].sort((a,b) => b.fecha - a.fecha);
+  txColFilters  = {};          // reset column filters when year/month changes
+  txOpenCol     = null;
+  buildTxHeader();
+  refreshTxTable();
+}
+
+function refreshTxTable() {
+  const visible = getTxFiltered();
+  renderTxBody(visible);
+  renderTxFooter(visible);
+  const badge = document.getElementById('txBadge');
+  badge.textContent = visible.length === txCurrentRows.length
+    ? `${visible.length} registros`
+    : `${visible.length} de ${txCurrentRows.length} registros`;
+  // Update active-filter dots on headers
+  TX_COLS.filter(c => c.filterable).forEach(c => {
+    const btn = document.querySelector(`.tx-filter-btn[data-col="${c.key}"]`);
+    if (btn) btn.classList.toggle('active', !!(txColFilters[c.key] && txColFilters[c.key].size > 0));
+  });
+}
+
+function getTxFiltered() {
+  return txCurrentRows.filter(row => {
+    for (const [key, allowed] of Object.entries(txColFilters)) {
+      if (!allowed || allowed.size === 0) continue;
+      if (!allowed.has(txGetVal(row, key))) return false;
+    }
+    return true;
+  });
+}
+
+function buildTxHeader() {
+  const thead = document.querySelector('#txTable thead tr');
+  if (!thead) return;
+  thead.innerHTML = '';
+  TX_COLS.forEach(col => {
+    const th = document.createElement('th');
+    th.className = col.align === 'right' ? 'text-right' : '';
+    if (col.filterable) {
+      th.innerHTML = `
+        <span class="th-label">${col.label}</span>
+        <button class="tx-filter-btn" data-col="${col.key}" title="Filtrar por ${col.label}">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+          </svg>
+        </button>`;
+      th.querySelector('.tx-filter-btn').addEventListener('click', e => {
+        e.stopPropagation();
+        toggleTxDropdown(col.key, e.currentTarget);
+      });
+    } else {
+      th.innerHTML = `<span class="th-label">${col.label}</span>`;
+    }
+    thead.appendChild(th);
+  });
+}
+
+function renderTxBody(rows) {
+  const tbody = document.getElementById('txTableBody');
   tbody.innerHTML = '';
-  for (const r of sorted) {
+  rows.forEach(r => {
+    const isInc = r.tipo_registro === 'Ingreso';
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${formatDate(r.fecha)}</td>
-      <td><span class="type-badge ${r.tipo_registro==='Ingreso'?'type-income':'type-expense'}">${r.tipo_registro}</span></td>
-      <td><strong style="color:var(--text-1)">${escHtml(r.tipo)}</strong></td>
-      <td style="color:var(--text-3)">${escHtml(r.subcategoria)}</td>
-      <td class="text-right" style="color:${r.tipo_registro==='Ingreso'?'var(--income)':'var(--expense)'};font-weight:600">
-        ${r.tipo_registro==='Ingreso'?'+':'-'}${formatMoney(r.monto)}
+      <td class="td-date">${escHtml(formatDate(r.fecha))}</td>
+      <td><span class="type-badge ${isInc?'type-income':'type-expense'}">${r.tipo_registro}</span></td>
+      <td><strong class="td-tipo">${escHtml(r.tipo)}</strong></td>
+      <td class="td-nombre">${escHtml(r.subcategoria)}</td>
+      <td class="text-right td-num">${r.importe > 0 ? formatMoney(r.importe) : '—'}</td>
+      <td class="text-right td-num">${r.iva     > 0 ? formatMoney(r.iva)     : '—'}</td>
+      <td class="text-right td-num">${r.ret     > 0 ? formatMoney(r.ret)     : '—'}</td>
+      <td class="text-right td-total" style="color:${isInc?'var(--income)':'var(--expense)'}">
+        ${isInc?'+':'-'}${formatMoney(r.monto)}
       </td>`;
     tbody.appendChild(tr);
+  });
+}
+
+function renderTxFooter(rows) {
+  const sumImporte = rows.reduce((s,r)=>s+r.importe,0);
+  const sumIva     = rows.reduce((s,r)=>s+r.iva,    0);
+  const sumRet     = rows.reduce((s,r)=>s+r.ret,    0);
+  const sumTotal   = rows.reduce((s,r)=>s+r.monto,  0);
+  const el = id => document.getElementById(id);
+  if (el('footImporte')) el('footImporte').textContent = formatMoney(sumImporte);
+  if (el('footIva'))     el('footIva').textContent     = formatMoney(sumIva);
+  if (el('footRet'))     el('footRet').textContent     = formatMoney(sumRet);
+  if (el('footTotal'))   el('footTotal').textContent   = formatMoney(sumTotal);
+  if (el('footCount'))   el('footCount').textContent   = `${rows.length} registros`;
+}
+
+// ── DROPDOWN DE FILTRO ──
+function toggleTxDropdown(colKey, btn) {
+  const existing = document.getElementById('txDropdownPanel');
+  if (txOpenCol === colKey && existing) { closeTxDropdown(); return; }
+  closeTxDropdown();
+  txOpenCol = colKey;
+  openTxDropdown(colKey, btn);
+}
+
+function openTxDropdown(colKey, anchorBtn) {
+  // Unique values in current ALL rows (before column filter for other cols)
+  const uniqueVals = [...new Set(txCurrentRows.map(r => txGetVal(r, colKey)))].sort();
+  const activeSet  = txColFilters[colKey] || null;
+
+  const panel = document.createElement('div');
+  panel.id = 'txDropdownPanel';
+  panel.className = 'tx-dropdown-panel';
+  panel.innerHTML = `
+    <div class="tx-dp-head">
+      <input id="txDpSearch" class="tx-dp-search" placeholder="Buscar…" autocomplete="off"/>
+      <div class="tx-dp-actions">
+        <button id="txDpAll">Todos</button>
+        <button id="txDpNone">Ninguno</button>
+      </div>
+    </div>
+    <div id="txDpList" class="tx-dp-list"></div>
+    <div class="tx-dp-foot">
+      <button id="txDpApply" class="tx-dp-btn-apply">Aplicar</button>
+      <button id="txDpClear" class="tx-dp-btn-clear">Limpiar filtro</button>
+    </div>`;
+  document.body.appendChild(panel);
+
+  // Populate checkboxes
+  const list = panel.querySelector('#txDpList');
+  function renderOptions(filter) {
+    list.innerHTML = '';
+    uniqueVals
+      .filter(v => !filter || v.toLowerCase().includes(filter))
+      .forEach(val => {
+        const checked = !activeSet || activeSet.has(val);
+        const item = document.createElement('label');
+        item.className = 'tx-dp-item';
+        item.innerHTML = `
+          <input type="checkbox" value="${escHtml(val)}" ${checked?'checked':''}>
+          <span>${escHtml(val)}</span>`;
+        list.appendChild(item);
+      });
   }
-  document.getElementById('txBadge').textContent = `${sorted.length} registros`;
+  renderOptions('');
+
+  panel.querySelector('#txDpSearch').addEventListener('input', e => renderOptions(e.target.value.toLowerCase()));
+  panel.querySelector('#txDpAll').addEventListener('click',  () => list.querySelectorAll('input').forEach(i=>i.checked=true));
+  panel.querySelector('#txDpNone').addEventListener('click', () => list.querySelectorAll('input').forEach(i=>i.checked=false));
+  panel.querySelector('#txDpApply').addEventListener('click', () => {
+    const checked = [...list.querySelectorAll('input:checked')].map(i=>i.value);
+    if (checked.length === uniqueVals.length) {
+      delete txColFilters[colKey];
+    } else {
+      txColFilters[colKey] = new Set(checked);
+    }
+    closeTxDropdown();
+    refreshTxTable();
+  });
+  panel.querySelector('#txDpClear').addEventListener('click', () => {
+    delete txColFilters[colKey];
+    closeTxDropdown();
+    refreshTxTable();
+  });
+
+  // Position below button
+  const rect = anchorBtn.getBoundingClientRect();
+  panel.style.top  = `${rect.bottom + window.scrollY + 4}px`;
+  panel.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 280)}px`;
+
+  // Close on outside click
+  setTimeout(() => document.addEventListener('click', outsideTxClick), 0);
+}
+
+function outsideTxClick(e) {
+  const panel = document.getElementById('txDropdownPanel');
+  if (panel && !panel.contains(e.target)) closeTxDropdown();
+}
+
+function closeTxDropdown() {
+  const panel = document.getElementById('txDropdownPanel');
+  if (panel) panel.remove();
+  txOpenCol = null;
+  document.removeEventListener('click', outsideTxClick);
 }
 
 // ══════════════════════════════════════════════════════
@@ -748,6 +953,8 @@ function toggleTheme() {
 
 function resetApp() {
   allRows=[]; yearRows=[]; filteredRows=[]; allYears=[];
+  txCurrentRows=[]; txColFilters={}; txOpenCol=null;
+  closeTxDropdown();
   document.getElementById('dashboardSection').classList.add('hidden');
   document.getElementById('yearFilterWrapper').classList.add('hidden');
   document.getElementById('monthFilterWrapper').classList.add('hidden');
