@@ -236,10 +236,10 @@
           </div>
         </div>
 
-        <!-- Gráfica dona: Egresos por categoría -->
+        <!-- Gráfica dona: Egresos por tipo -->
         <div class="chart-card chart-donut-card">
           <div class="chart-header">
-            <h3 class="chart-title">Egresos por Categoría</h3>
+            <h3 class="chart-title">Egresos por Tipo</h3>
           </div>
           <div class="chart-body donut-body">
             <canvas id="donutChart"></canvas>
@@ -252,18 +252,59 @@
 
       </div>
 
-      <!-- ── TABLA DE CATEGORÍAS ── -->
+      <!-- ══════════════════════════════════
+           SECCIÓN: INGRESOS Y EGRESOS POR TIPO
+      ══════════════════════════════════ -->
+      <div class="section-divider">
+        <div class="section-divider-line"></div>
+        <span class="section-divider-label">Análisis por Tipo</span>
+        <div class="section-divider-line"></div>
+      </div>
+
+      <div class="tipo-grid">
+
+        <!-- Ingresos por tipo -->
+        <div class="chart-card tipo-card">
+          <div class="chart-header">
+            <div class="tipo-header-left">
+              <div class="tipo-dot tipo-dot-income"></div>
+              <h3 class="chart-title">Ingresos por Tipo</h3>
+            </div>
+            <span class="table-badge" id="tipoIngBadge">0 tipos</span>
+          </div>
+          <div class="chart-body tipo-chart-body">
+            <canvas id="tipoIngChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Egresos por tipo -->
+        <div class="chart-card tipo-card">
+          <div class="chart-header">
+            <div class="tipo-header-left">
+              <div class="tipo-dot tipo-dot-expense"></div>
+              <h3 class="chart-title">Egresos por Tipo</h3>
+            </div>
+            <span class="table-badge" id="tipoEgrBadge">0 tipos</span>
+          </div>
+          <div class="chart-body tipo-chart-body">
+            <canvas id="tipoEgrChart"></canvas>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ── TABLA DE CATEGORÍAS / TIPOS ── -->
       <div class="table-card">
         <div class="table-header">
-          <h3 class="chart-title">Desglose por Categoría</h3>
+          <h3 class="chart-title">Desglose por Tipo</h3>
           <span class="table-badge" id="tableBadge">0 categorías</span>
         </div>
         <div class="table-wrapper">
           <table class="data-table" id="categoryTable">
             <thead>
               <tr>
-                <th>Categoría</th>
                 <th>Tipo</th>
+                <th>Movimiento</th>
                 <th class="text-right">Total</th>
                 <th class="text-right">% del gasto</th>
                 <th class="text-right">Transacciones</th>
@@ -287,9 +328,9 @@
             <thead>
               <tr>
                 <th>Fecha</th>
+                <th>Movimiento</th>
                 <th>Tipo</th>
-                <th>Categoría</th>
-                <th>Subcategoría</th>
+                <th>Proveedor / Cliente</th>
                 <th class="text-right">Monto</th>
               </tr>
             </thead>
