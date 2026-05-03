@@ -739,12 +739,46 @@ body {
    TABLA AVANZADA DE TRANSACCIONES
 ══════════════════════════════════════════════════════ */
 
-/* Header de la tabla */
+/* ── Header de la tabla de transacciones ── */
 .tx-title-group {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+.tx-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Botón filtro de Año */
+.tx-year-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+.tx-year-filter-btn:hover {
+  background: var(--bg-2);
+  color: var(--text-1);
+  border-color: var(--accent);
+}
+.tx-year-filter-btn.active {
+  background: rgba(99,102,241,0.15);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* Botón limpiar todos los filtros */
@@ -768,6 +802,47 @@ body {
   background: rgba(244,63,94,0.2);
   border-color: var(--expense);
 }
+
+/* ══════════════════════════════════════════════════════
+   TABLA DESGLOSE POR TIPO — alineación y filtros
+══════════════════════════════════════════════════════ */
+.cat-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.cat-table thead tr {
+  /* NO sticky — tabla corta */
+}
+.cat-table th {
+  padding: 10px 14px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-3);
+  border-bottom: 2px solid var(--border-2);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.cat-th-left  { text-align: left; }
+.cat-th-right { text-align: right; }
+
+.cat-table td {
+  padding: 11px 14px;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.cat-td-nombre { color: var(--text-1); font-weight: 600; }
+.cat-td-mov    { }
+.cat-td-total  { text-align: right; color: var(--text-1); font-weight: 700; font-variant-numeric: tabular-nums; }
+.cat-td-pct    { text-align: right; min-width: 160px; }
+.cat-td-count  { text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.pct-label     { font-size: 0.8rem; color: var(--text-2); min-width: 44px; display:inline-block; text-align:right; }
+
+.cat-table tbody tr:hover td { background: rgba(255,255,255,0.03); }
+[data-theme="light"] .cat-table tbody tr:hover td { background: rgba(0,0,0,0.03); }
 
 /* Wrapper con scroll */
 .tx-table-wrapper {
