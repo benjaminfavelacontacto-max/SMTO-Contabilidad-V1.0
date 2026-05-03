@@ -471,61 +471,79 @@ function renderDonutChart(rows) {
   const byTipo = agrupar(egr, 'tipo');
   const total  = egr.reduce((s,r) => s + r.monto, 0);
 
-  // Top 8 categorías + "Otros" para no saturar la leyenda
-  const all    = Object.entries(byTipo).sort((a,b) => b[1] - a[1]);
-  const top    = all.slice(0, 8);
+  // Top 8 + "Otros"
+  const all       = Object.entries(byTipo).sort((a,b) => b[1] - a[1]);
+  const top       = all.slice(0, 8);
   const othersSum = all.slice(8).reduce((s,[,v]) => s + v, 0);
-  const slices = othersSum > 0 ? [...top, ['Otros', othersSum]] : top;
+  const slices    = othersSum > 0 ? [...top, ['Otros', othersSum]] : top;
 
-  document.getElementById('donutTotal').textContent = formatMoney(total);
+  const isDark     = document.documentElement.getAttribute('data-theme') !== 'light';
+  const lblColor   = '#ffffff';                          // blanco para contraste
+  const subColor   = isDark ? '#94a3b8' : '#64748b';
+  const centerMain = isDark ? '#f1f5f9' : '#0f172a';
 
-  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  const ctx    = document.getElementById('donutChart').getContext('2d');
+  // Plugin: dibuja TOTAL + valor en el centro del anillo (canvas-space)
+  const centerPlugin = {
+    id: 'donutCenter',
+    beforeDraw(chart) {
+      const { ctx: c, chartArea } = chart;
+      if (!chartArea) return;
+      const cx = chartArea.left + chartArea.width  / 2;
+      const cy = chartArea.top  + chartArea.height / 2;
+      c.save();
+      c.textAlign    = 'center';
+      c.textBaseline = 'middle';
+      // Sub-label
+      c.font      = '500 11px Inter, system-ui, sans-serif';
+      c.fillStyle = subColor;
+      c.fillText('TOTAL', cx, cy - 15);
+      // Valor principal
+      c.font      = '800 18px Inter, system-ui, sans-serif';
+      c.fillStyle = centerMain;
+      c.fillText(formatMoneyShort(total), cx, cy + 10);
+      c.restore();
+    },
+  };
+
+  const ctxEl = document.getElementById('donutChart').getContext('2d');
   if (donutChartInst) donutChartInst.destroy();
-  donutChartInst = new Chart(ctx, {
+  donutChartInst = new Chart(ctxEl, {
     type: 'doughnut',
+    plugins: [centerPlugin],
     data: {
       labels: slices.map(([t]) => t),
       datasets: [{
         data:            slices.map(([,v]) => v),
         backgroundColor: slices.map((_,i) => PALETTE[i % PALETTE.length]),
-        borderColor:     isDark ? '#1e293b' : '#fff',
-        borderWidth: 2,
-        hoverOffset: 8,
+        borderColor:     isDark ? '#1e293b' : '#f8fafc',
+        borderWidth:     2,
+        hoverOffset:     10,
       }],
     },
     options: {
-      responsive: true, maintainAspectRatio: false, cutout: '68%',
-      layout: { padding: { top: 8, bottom: 8 } },
+      responsive:        true,
+      maintainAspectRatio: false,
+      cutout:            '68%',
+      layout:            { padding: { top: 4, bottom: 4, left: 4, right: 4 } },
       plugins: {
         legend: {
-          position: 'right',
+          position: 'bottom',
+          align:    'center',
           labels: {
-            color:         isDark ? '#94a3b8' : '#475569',
-            font:          { family:'Inter', size:11 },
-            padding:       10,
+            color:         lblColor,
+            font:          { family: 'Inter', size: 11, weight: '500' },
+            padding:       16,
             boxWidth:      10,
             usePointStyle: true,
-            // Truncar etiquetas largas
-            generateLabels: chart => {
-              const ds = chart.data.datasets[0];
-              return chart.data.labels.map((lbl, i) => ({
-                text:        lbl.length > 18 ? lbl.slice(0,16)+'…' : lbl,
-                fillStyle:   ds.backgroundColor[i],
-                strokeStyle: ds.borderColor,
-                lineWidth:   ds.borderWidth,
-                hidden:      false,
-                index:       i,
-              }));
-            },
+            pointStyleWidth: 8,
           },
         },
         tooltip: {
-          backgroundColor: isDark?'#1e293b':'#fff',
-          titleColor:      isDark?'#f1f5f9':'#0f172a',
-          bodyColor:       isDark?'#94a3b8':'#475569',
-          borderColor:     isDark?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.1)',
-          borderWidth:1, padding:12, cornerRadius:10,
+          backgroundColor: isDark ? '#1e293b' : '#fff',
+          titleColor:      isDark ? '#f1f5f9' : '#0f172a',
+          bodyColor:       isDark ? '#94a3b8' : '#475569',
+          borderColor:     isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)',
+          borderWidth: 1, padding: 12, cornerRadius: 10,
           callbacks: {
             label: ctx => {
               const v   = ctx.dataset.data[ctx.dataIndex];
@@ -724,9 +742,12 @@ function buildTxHeader() {
 }
 
 function renderTxBody(rows) {
-  const tbody = document.getElementById('txTableBody');
-  tbody.innerHTML = '';
-  rows.forEach(r => {
+  const tbody  = document.getElementById('txTableBody');
+  const LIMIT  = 500;
+  const display = rows.length > LIMIT ? rows.slice(0, LIMIT) : rows;
+  const frag   = document.createDocumentFragment();
+
+  display.forEach(r => {
     const isInc = r.tipo_registro === 'Ingreso';
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -740,8 +761,20 @@ function renderTxBody(rows) {
       <td class="text-right td-total" style="color:${isInc?'var(--income)':'var(--expense)'}">
         ${isInc?'+':'-'}${formatMoney(r.monto)}
       </td>`;
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   });
+
+  // Nota si hay más filas
+  if (rows.length > LIMIT) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="8" class="tx-limit-note">
+      Mostrando ${LIMIT} de ${rows.length} filas — usa los filtros para ver un subconjunto específico
+    </td>`;
+    frag.appendChild(tr);
+  }
+
+  tbody.innerHTML = '';
+  tbody.appendChild(frag);
 }
 
 function renderTxFooter(rows) {
@@ -826,10 +859,11 @@ function openTxDropdown(colKey, anchorBtn) {
     refreshTxTable();
   });
 
-  // Position below button
+  // Position below button (fixed → usa coordenadas del viewport directamente)
   const rect = anchorBtn.getBoundingClientRect();
-  panel.style.top  = `${rect.bottom + window.scrollY + 4}px`;
-  panel.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 280)}px`;
+  const panelW = 260;
+  panel.style.top  = `${rect.bottom + 4}px`;
+  panel.style.left = `${Math.min(rect.left, window.innerWidth - panelW - 8)}px`;
 
   // Close on outside click
   setTimeout(() => document.addEventListener('click', outsideTxClick), 0);
@@ -1044,6 +1078,17 @@ function parseDate(val) {
     if (!isNaN(d.getTime())) return d;
   }
 
+  // Serial de Excel guardado como string numérico (ej: "42739" → 4-Ene-2017)
+  // Rango: 1 (1-Ene-1900) a 2958465 (31-Dic-9999)
+  if (/^\d{4,6}$/.test(str)) {
+    const serial = parseInt(str, 10);
+    if (serial > 1 && serial < 2958465) {
+      const ms  = Math.round((serial - 25569) * 86400 * 1000);
+      const utc = new Date(ms);
+      return new Date(utc.getUTCFullYear(), utc.getUTCMonth(), utc.getUTCDate());
+    }
+  }
+
   return null;
 }
 
@@ -1088,7 +1133,12 @@ function tooltipDefaults(isDark, labelFn, isDonut=false, horizontal=false) {
       label: isDonut
         ? ctx => labelFn(ctx.parsed, ctx)
         // Acceso directo al array de datos — más confiable que ctx.parsed en ambos ejes
-        : ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.dataset.data[ctx.dataIndex])}`,
+        // Para barras horizontales (sin label de dataset) se usa el label de categoría
+        : ctx => {
+            const val  = ctx.dataset.data[ctx.dataIndex];
+            const lbl  = ctx.dataset.label || ctx.label || '';
+            return ` ${lbl ? lbl + ': ' : ''}${labelFn(val)}`;
+          },
     },
   };
 }
