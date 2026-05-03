@@ -24,6 +24,11 @@ let txCurrentRows  = [];  // filas actuales antes de filtros de columna
 let txColFilters   = {};  // colKey → Set<string> | vacío = sin filtro
 let txOpenCol      = null; // columna cuyo dropdown está abierto
 
+// ─── ESTADO TABLA DESGLOSE POR TIPO ───────────────────
+let catAllRows     = [];  // todas las filas del desglose (rebuilt en render)
+let catColFilters  = {};  // colKey → Set<string>
+let catOpenCol     = null;
+
 // ─── PALETA ──────────────────────────────────────────
 const PALETTE = [
   '#6366f1','#8b5cf6','#ec4899','#f43f5e',
@@ -216,8 +221,8 @@ function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHi
     const rawTotal = row[cTotal] || '';
     if (!rawFecha && !rawTotal) continue;
 
+    // Fecha puede ser null — esas filas se incluyen como "Sin fecha"
     const fecha = parseDate(rawFecha);
-    if (!fecha) continue;
 
     const total = parseMonto(rawTotal);
     if (isNaN(total) || total === 0) continue;
@@ -229,9 +234,9 @@ function parseSheetStrings(ws, tipoReg, dateHints, totalHints, tipoHints, nameHi
     const ret     = cRet     >= 0 ? (parseMonto(row[cRet]     || '0') || 0) : 0;
 
     result.push({
-      fecha,
-      year:          fecha.getFullYear(),
-      mes:           fecha.getMonth(),
+      fecha,                                          // Date | null
+      year:          fecha ? fecha.getFullYear() : 'Sin fecha',
+      mes:           fecha ? fecha.getMonth()    : null,
       tipo_registro: tipoReg,
       tipo,
       categoria:     tipo,
@@ -275,10 +280,13 @@ function parseMultiSheet(wb) {
   const combined = [...rowsIng, ...rowsEgr];
   if (combined.length === 0) return [];
 
-  // Auto-detectar el año más frecuente en los datos
+  // Auto-detectar el año más frecuente (solo filas con fecha válida)
   const yearCount = {};
-  for (const r of combined) yearCount[r.year] = (yearCount[r.year] || 0) + 1;
-  detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
+  for (const r of combined) {
+    if (r.year !== 'Sin fecha') yearCount[r.year] = (yearCount[r.year] || 0) + 1;
+  }
+  const topYear = Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0];
+  detectedYear = topYear ? parseInt(topYear[0], 10) : new Date().getFullYear();
 
   // Retornar TODOS los años (el filtrado por año ocurre en buildDashboard)
   return combined;
@@ -319,8 +327,7 @@ function normalizeSingleSheet(raw) {
   const rows = [];
   for (const row of raw) {
     try {
-      const fecha = parseDate(row[colFecha]);
-      if (!fecha) continue;
+      const fecha = parseDate(row[colFecha]);   // puede ser null → 'Sin fecha'
       const monto = parseMonto(row[colMonto]);
       if (isNaN(monto) || monto === 0) continue;
 
@@ -340,8 +347,8 @@ function normalizeSingleSheet(raw) {
 
       rows.push({
         fecha,
-        year:          fecha.getFullYear(),
-        mes:           fecha.getMonth(),
+        year:          fecha ? fecha.getFullYear() : 'Sin fecha',
+        mes:           fecha ? fecha.getMonth()    : null,
         tipo_registro: tipoReg,
         tipo:          capitalizar(tipoVal),
         categoria:     capitalizar(cat),
@@ -353,10 +360,13 @@ function normalizeSingleSheet(raw) {
 
   if (rows.length === 0) return [];
 
-  // Auto-detectar año dominante
+  // Auto-detectar año dominante (solo filas con fecha válida)
   const yearCount = {};
-  for (const r of rows) yearCount[r.year] = (yearCount[r.year] || 0) + 1;
-  detectedYear = parseInt(Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0][0], 10);
+  for (const r of rows) {
+    if (r.year !== 'Sin fecha') yearCount[r.year] = (yearCount[r.year] || 0) + 1;
+  }
+  const topYear = Object.entries(yearCount).sort((a,b) => b[1]-a[1])[0];
+  detectedYear = topYear ? parseInt(topYear[0], 10) : new Date().getFullYear();
 
   // Retornar TODOS los años
   return rows;
@@ -426,6 +436,7 @@ function renderBarChart(rows) {
   const meses = Array.from({length:12}, ()=>({ing:0, egr:0}));
   const conDatos = new Set();
   for (const r of rows) {
+    if (r.mes === null) continue;  // filas sin fecha no se grafican por mes
     meses[r.mes][r.tipo_registro==='Ingreso'?'ing':'egr'] += r.monto;
     conDatos.add(r.mes);
   }
@@ -621,44 +632,232 @@ function renderTipoBar(rows, canvasId, color, badgeId) {
   });
 }
 
-// ── Tabla de categorías/tipos ──
+// ══════════════════════════════════════════════════════
+// TABLA DESGLOSE POR TIPO — con filtros tipo Excel
+// ══════════════════════════════════════════════════════
+
+const CAT_COLS = [
+  { key:'cat',   label:'Tipo',          align:'left',  filterable:true  },
+  { key:'tipo',  label:'Movimiento',    align:'left',  filterable:true  },
+  { key:'total', label:'Total',         align:'right', filterable:false },
+  { key:'pct',   label:'% del Gasto',   align:'right', filterable:false },
+  { key:'count', label:'Transacciones', align:'right', filterable:false },
+];
+
+function catGetVal(row, key) { return String(row[key] ?? ''); }
+
 function renderCategoryTable(rows) {
   const egr      = rows.filter(r => r.tipo_registro === 'Egreso');
   const ing      = rows.filter(r => r.tipo_registro === 'Ingreso');
-  const totalEgr = egr.reduce((s,r)=>s+r.monto,0);
+  const totalEgr = egr.reduce((s, r) => s + r.monto, 0);
 
-  const byCatE = agrupar(egr,'tipo');
-  const byCatI = agrupar(ing,'tipo');
-  const cntE   = contar(egr,'tipo');
-  const cntI   = contar(ing,'tipo');
+  const byCatE = agrupar(egr, 'tipo');
+  const byCatI = agrupar(ing, 'tipo');
+  const cntE   = contar(egr, 'tipo');
+  const cntI   = contar(ing, 'tipo');
 
   const allCats = new Set([...Object.keys(byCatE), ...Object.keys(byCatI)]);
   const entries = [];
   for (const cat of allCats) {
-    if (byCatE[cat]) entries.push({cat, tipo:'Egreso',  total:byCatE[cat], count:cntE[cat]||0});
-    if (byCatI[cat]) entries.push({cat, tipo:'Ingreso', total:byCatI[cat], count:cntI[cat]||0});
+    if (byCatE[cat]) {
+      const t = byCatE[cat];
+      entries.push({ cat, tipo:'Egreso',  total:t, count:cntE[cat]||0, pct: totalEgr > 0 ? t/totalEgr*100 : 0 });
+    }
+    if (byCatI[cat]) {
+      entries.push({ cat, tipo:'Ingreso', total:byCatI[cat], count:cntI[cat]||0, pct: 0 });
+    }
   }
-  entries.sort((a,b)=>b.total-a.total);
+  entries.sort((a, b) => b.total - a.total);
 
+  catAllRows    = entries;
+  catColFilters = {};
+  catOpenCol    = null;
+  buildCatHeader();
+  refreshCatTable();
+}
+
+function buildCatHeader() {
+  const thead = document.querySelector('#categoryTable thead tr');
+  if (!thead) return;
+  thead.innerHTML = '';
+  CAT_COLS.forEach(col => {
+    const th = document.createElement('th');
+    th.className = col.align === 'right' ? 'text-right cat-th-right' : 'cat-th-left';
+    if (col.filterable) {
+      th.innerHTML = `
+        <span class="th-label">${col.label}</span>
+        <button class="tx-filter-btn cat-filter-btn" data-catcol="${col.key}" title="Filtrar por ${col.label}">
+          <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+          </svg>
+        </button>`;
+      th.querySelector('.cat-filter-btn').addEventListener('click', e => {
+        e.stopPropagation();
+        toggleCatDropdown(col.key, e.currentTarget);
+      });
+    } else {
+      th.innerHTML = `<span class="th-label">${col.label}</span>`;
+    }
+    thead.appendChild(th);
+  });
+}
+
+function getCatFiltered() {
+  return catAllRows.filter(row => {
+    for (const [key, allowed] of Object.entries(catColFilters)) {
+      if (!allowed || allowed.size === 0) continue;
+      if (!allowed.has(catGetVal(row, key))) return false;
+    }
+    return true;
+  });
+}
+
+function refreshCatTable() {
+  const visible = getCatFiltered();
+  renderCatBody(visible);
+  document.getElementById('tableBadge').textContent =
+    visible.length === catAllRows.length
+      ? `${visible.length} categorías`
+      : `${visible.length} de ${catAllRows.length} categorías`;
+
+  // Actualizar estado de botones filtro
+  CAT_COLS.filter(c => c.filterable).forEach(c => {
+    const btn = document.querySelector(`.cat-filter-btn[data-catcol="${c.key}"]`);
+    if (!btn) return;
+    const isActive = !!(catColFilters[c.key] && catColFilters[c.key].size > 0);
+    btn.classList.toggle('active', isActive);
+    let dot = btn.querySelector('.tx-filter-dot');
+    if (isActive && !dot) { dot = document.createElement('span'); dot.className='tx-filter-dot'; btn.appendChild(dot); }
+    if (!isActive && dot) dot.remove();
+  });
+}
+
+function renderCatBody(entries) {
   const tbody = document.getElementById('categoryTableBody');
-  tbody.innerHTML = '';
+  const frag  = document.createDocumentFragment();
   for (const e of entries) {
-    const pct = (e.tipo==='Egreso' && totalEgr>0) ? (e.total/totalEgr*100) : null;
-    const tr  = document.createElement('tr');
+    const isInc = e.tipo === 'Ingreso';
+    const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td><strong style="color:var(--text-1)">${escHtml(e.cat)}</strong></td>
-      <td><span class="type-badge ${e.tipo==='Ingreso'?'type-income':'type-expense'}">${e.tipo}</span></td>
-      <td class="text-right" style="color:var(--text-1);font-weight:600">${formatMoney(e.total)}</td>
-      <td class="text-right">
-        ${pct!==null
-          ? `<div class="progress-cell"><span>${pct.toFixed(1)}%</span>
-             <div class="progress-bar"><div class="progress-fill" style="width:${Math.min(pct,100)}%"></div></div></div>`
-          : '<span style="color:var(--text-3)">—</span>'}
+      <td class="cat-td-nombre"><strong>${escHtml(e.cat)}</strong></td>
+      <td class="cat-td-mov"><span class="type-badge ${isInc?'type-income':'type-expense'}">${e.tipo}</span></td>
+      <td class="text-right cat-td-total">${formatMoney(e.total)}</td>
+      <td class="text-right cat-td-pct">
+        ${e.tipo==='Egreso' && e.pct > 0
+          ? `<div class="progress-cell">
+               <span class="pct-label">${e.pct.toFixed(1)}%</span>
+               <div class="progress-bar"><div class="progress-fill" style="width:${Math.min(e.pct,100)}%"></div></div>
+             </div>`
+          : '<span class="td-nil">—</span>'}
       </td>
-      <td class="text-right">${e.count}</td>`;
-    tbody.appendChild(tr);
+      <td class="text-right cat-td-count">${e.count.toLocaleString('es-MX')}</td>`;
+    frag.appendChild(tr);
   }
-  document.getElementById('tableBadge').textContent = `${entries.length} categorías`;
+  tbody.innerHTML = '';
+  tbody.appendChild(frag);
+}
+
+// ── DROPDOWN PARA TABLA DESGLOSE ──
+function toggleCatDropdown(colKey, btn) {
+  const existing = document.getElementById('txDropdownPanel');
+  if (catOpenCol === colKey && existing) { closeCatDropdown(); return; }
+  closeCatDropdown();
+  catOpenCol = colKey;
+  openCatDropdown(colKey, btn);
+}
+
+function openCatDropdown(colKey, anchorBtn) {
+  const col      = CAT_COLS.find(c => c.key === colKey);
+  const allVals  = [...new Set(catAllRows.map(r => catGetVal(r, colKey)))].sort();
+  const activeSet = catColFilters[colKey] || null;
+
+  const panel = document.createElement('div');
+  panel.id        = 'txDropdownPanel';   // mismo id → close function funciona
+  panel.className = 'tx-dropdown-panel';
+  panel.innerHTML = `
+    <div class="tx-dp-title">${escHtml(col?.label || colKey)}</div>
+    <div class="tx-dp-head">
+      <div class="tx-dp-search-wrap">
+        <svg class="tx-dp-search-icon" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="txDpSearch" class="tx-dp-search" placeholder="Buscar…" autocomplete="off"/>
+      </div>
+    </div>
+    <div id="txDpList" class="tx-dp-list"></div>
+    <div class="tx-dp-foot">
+      <button id="txDpApply" class="tx-dp-btn-apply">Aplicar</button>
+      <button id="txDpClear" class="tx-dp-btn-clear">Limpiar</button>
+    </div>`;
+  document.body.appendChild(panel);
+
+  const list = panel.querySelector('#txDpList');
+
+  function renderOptions(filterText) {
+    list.innerHTML = '';
+    const filtered = allVals.filter(v => !filterText || v.toLowerCase().includes(filterText));
+    // Select All
+    const saRow = document.createElement('label');
+    saRow.className = 'tx-dp-item tx-dp-select-all-item';
+    const allChecked  = filtered.every(v => !activeSet || activeSet.has(v));
+    const someChecked = filtered.some(v => !activeSet || activeSet.has(v));
+    saRow.innerHTML = `<input type="checkbox" id="txDpCbAll" ${allChecked?'checked':''}>
+      <span><strong>Seleccionar todo</strong></span><span class="tx-dp-count">${filtered.length}</span>`;
+    const cbAll = saRow.querySelector('#txDpCbAll');
+    if (!allChecked && someChecked) cbAll.indeterminate = true;
+    cbAll.addEventListener('change', () => list.querySelectorAll('.tx-dp-value-cb').forEach(i=>i.checked=cbAll.checked));
+    list.appendChild(saRow);
+    const sep = document.createElement('div'); sep.className='tx-dp-sep'; list.appendChild(sep);
+
+    filtered.forEach(val => {
+      const checked = !activeSet || activeSet.has(val);
+      const item = document.createElement('label');
+      item.className = 'tx-dp-item';
+      item.innerHTML = `<input type="checkbox" class="tx-dp-value-cb" value="${escHtml(val)}" ${checked?'checked':''}>
+        <span title="${escHtml(val)}">${escHtml(val)}</span>`;
+      list.appendChild(item);
+    });
+    list.addEventListener('change', e => {
+      if (e.target.classList.contains('tx-dp-value-cb')) {
+        const cbs = [...list.querySelectorAll('.tx-dp-value-cb')];
+        const sel = cbs.filter(i=>i.checked).length;
+        const cbA = list.querySelector('#txDpCbAll');
+        if (cbA) { cbA.checked = sel===cbs.length; cbA.indeterminate = sel>0 && sel<cbs.length; }
+      }
+    });
+  }
+  renderOptions('');
+  panel.querySelector('#txDpSearch').addEventListener('input', e => renderOptions(e.target.value.toLowerCase()));
+  panel.querySelector('#txDpApply').addEventListener('click', () => {
+    const checked = [...list.querySelectorAll('.tx-dp-value-cb:checked')].map(i=>i.value);
+    if (checked.length === allVals.length || checked.length === 0) delete catColFilters[colKey];
+    else catColFilters[colKey] = new Set(checked);
+    closeCatDropdown(); refreshCatTable();
+  });
+  panel.querySelector('#txDpClear').addEventListener('click', () => {
+    delete catColFilters[colKey]; closeCatDropdown(); refreshCatTable();
+  });
+
+  const rect   = anchorBtn.getBoundingClientRect();
+  const panelW = 280;
+  panel.style.top  = `${rect.bottom + 4}px`;
+  panel.style.left = `${Math.min(rect.left, window.innerWidth - panelW - 8)}px`;
+  requestAnimationFrame(() => {
+    const ph = panel.offsetHeight;
+    if (rect.bottom + ph > window.innerHeight - 8) panel.style.top = `${rect.top - ph - 4}px`;
+  });
+  setTimeout(() => document.addEventListener('click', outsideCatClick), 0);
+}
+
+function outsideCatClick(e) {
+  const panel = document.getElementById('txDropdownPanel');
+  if (panel && !panel.contains(e.target)) closeCatDropdown();
+}
+function closeCatDropdown() {
+  const panel = document.getElementById('txDropdownPanel');
+  if (panel) panel.remove();
+  catOpenCol = null;
+  document.removeEventListener('click', outsideCatClick);
 }
 
 // ══════════════════════════════════════════════════════
@@ -679,7 +878,25 @@ const TX_COLS = [
 
 function txGetVal(row, key) {
   if (key === 'fecha_str') return formatDate(row.fecha);
+  if (key === 'year')      return String(row.year ?? 'Sin fecha');
   return String(row[key] ?? '');
+}
+
+/** Construye / actualiza el botón de filtro de Año en el header de la tabla */
+function buildTxYearControl() {
+  const btn = document.getElementById('txYearFilterBtn');
+  if (!btn) return;
+  btn.onclick = e => { e.stopPropagation(); toggleTxDropdown('year', btn); };
+  syncYearBtnState();
+}
+
+function syncYearBtnState() {
+  const btn = document.getElementById('txYearFilterBtn');
+  if (!btn) return;
+  const isActive = !!(txColFilters['year'] && txColFilters['year'].size > 0);
+  btn.classList.toggle('active', isActive);
+  const lbl = btn.querySelector('.tx-yr-label');
+  if (lbl) lbl.textContent = isActive ? `Año (${txColFilters['year'].size})` : 'Año';
 }
 
 /** Cuenta cuántos filtros de columna están activos */
@@ -688,10 +905,16 @@ function txActiveFilterCount() {
 }
 
 function renderTxTable(rows) {
-  txCurrentRows = [...rows].sort((a, b) => b.fecha - a.fecha);
+  txCurrentRows = [...rows].sort((a, b) => {
+    if (!a.fecha && !b.fecha) return 0;
+    if (!a.fecha) return 1;   // sin fecha → al final
+    if (!b.fecha) return -1;
+    return b.fecha - a.fecha;
+  });
   txColFilters  = {};
   txOpenCol     = null;
   buildTxHeader();
+  buildTxYearControl();
   refreshTxTable();
 }
 
@@ -732,6 +955,8 @@ function refreshTxTable() {
     clearAllBtn.style.display = count > 0 ? 'inline-flex' : 'none';
     clearAllBtn.textContent   = count > 1 ? `Limpiar ${count} filtros` : 'Limpiar filtro';
   }
+  // Sincronizar botón de año
+  syncYearBtnState();
 }
 
 function getTxFiltered() {
@@ -821,7 +1046,15 @@ function toggleTxDropdown(colKey, btn) {
 
 function openTxDropdown(colKey, anchorBtn) {
   const colLabel   = TX_COLS.find(c => c.key === colKey)?.label || colKey;
-  const allVals    = [...new Set(txCurrentRows.map(r => txGetVal(r, colKey)))].sort();
+  // Para el key 'year': orden numérico ascendente con 'Sin fecha' al final
+  const rawVals  = [...new Set(txCurrentRows.map(r => txGetVal(r, colKey)))];
+  const allVals  = colKey === 'year'
+    ? rawVals.sort((a, b) => {
+        if (a === 'Sin fecha') return 1;
+        if (b === 'Sin fecha') return -1;
+        return Number(a) - Number(b);
+      })
+    : rawVals.sort();
   const activeSet  = txColFilters[colKey] || null;   // null → todos activos
   const totalCount = allVals.length;
 
@@ -960,10 +1193,11 @@ function closeTxDropdown() {
   document.removeEventListener('click', outsideTxClick);
 }
 
-/** Limpia todos los filtros de columna activos */
+/** Limpia todos los filtros de columna activos (incluye año) */
 function clearAllTxFilters() {
   txColFilters = {};
   refreshTxTable();
+  syncYearBtnState();
 }
 
 // ══════════════════════════════════════════════════════
@@ -1198,6 +1432,7 @@ function formatMoneyShort(n) {
   return`$${n}`;
 }
 function formatDate(d) {
+  if (!d) return 'Sin fecha';
   return d.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'});
 }
 function escHtml(s) {
