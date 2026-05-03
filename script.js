@@ -358,9 +358,9 @@ function buildDashboard(rows) {
   allRows  = rows;
   allYears = [...new Set(rows.map(r => r.year))].sort((a,b) => a - b);
 
-  // Por defecto mostrar el año más frecuente
-  yearRows     = rows.filter(r => r.year === detectedYear);
-  filteredRows = yearRows;
+  // Por defecto mostrar TODOS los datos (para que el total coincida con el Excel)
+  yearRows     = rows;
+  filteredRows = rows;
 
   renderKPIs(filteredRows);
   renderBarChart(filteredRows);
@@ -369,12 +369,12 @@ function buildDashboard(rows) {
   renderCategoryTable(filteredRows);
   renderTxTable(filteredRows);
   buildYearFilter(rows);
-  buildMonthFilter(yearRows);
+  buildMonthFilter(rows);
 
   hideLoading();
   document.getElementById('uploadSection').classList.add('hidden');
   document.getElementById('dashboardSection').classList.remove('hidden');
-  document.getElementById('dashSubtitle').textContent = `Año ${detectedYear}`;
+  document.getElementById('dashSubtitle').textContent = 'Datos completos';
   document.getElementById('yearFilterWrapper').classList.remove('hidden');
   document.getElementById('monthFilterWrapper').classList.remove('hidden');
   document.getElementById('exportCsvBtn').classList.remove('hidden');
@@ -446,10 +446,15 @@ function renderBarChart(rows) {
 
 // ── Dona: Egresos por tipo ──
 function renderDonutChart(rows) {
-  const egr      = rows.filter(r => r.tipo_registro === 'Egreso');
-  const byTipo   = agrupar(egr, 'tipo');
-  const sorted   = Object.entries(byTipo).sort((a,b)=>b[1]-a[1]).slice(0,10);
-  const total    = egr.reduce((s,r)=>s+r.monto,0);
+  const egr    = rows.filter(r => r.tipo_registro === 'Egreso');
+  const byTipo = agrupar(egr, 'tipo');
+  const total  = egr.reduce((s,r) => s + r.monto, 0);
+
+  // Top 8 categorías + "Otros" para no saturar la leyenda
+  const all    = Object.entries(byTipo).sort((a,b) => b[1] - a[1]);
+  const top    = all.slice(0, 8);
+  const othersSum = all.slice(8).reduce((s,[,v]) => s + v, 0);
+  const slices = othersSum > 0 ? [...top, ['Otros', othersSum]] : top;
 
   document.getElementById('donutTotal').textContent = formatMoney(total);
 
@@ -457,23 +462,57 @@ function renderDonutChart(rows) {
   const ctx    = document.getElementById('donutChart').getContext('2d');
   if (donutChartInst) donutChartInst.destroy();
   donutChartInst = new Chart(ctx, {
-    type:'doughnut',
-    data:{
-      labels: sorted.map(([t])=>t),
-      datasets:[{
-        data:   sorted.map(([,v])=>v),
-        backgroundColor: sorted.map((_,i)=>PALETTE[i%PALETTE.length]),
-        borderColor: isDark?'#1e293b':'#fff', borderWidth:3, hoverOffset:6,
+    type: 'doughnut',
+    data: {
+      labels: slices.map(([t]) => t),
+      datasets: [{
+        data:            slices.map(([,v]) => v),
+        backgroundColor: slices.map((_,i) => PALETTE[i % PALETTE.length]),
+        borderColor:     isDark ? '#1e293b' : '#fff',
+        borderWidth: 2,
+        hoverOffset: 8,
       }],
     },
-    options:{
-      responsive:true, maintainAspectRatio:false, cutout:'72%',
-      plugins:{
-        legend:{position:'bottom', labels:{color:isDark?'#94a3b8':'#475569', font:{family:'Inter',size:11}, padding:12, boxWidth:10, usePointStyle:true}},
-        tooltip: tooltipDefaults(isDark, (v,ctx2)=>{
-          const pct = total>0 ? (v/total*100).toFixed(1) : '0';
-          return ` ${ctx2.label}: ${formatMoney(v)} (${pct}%)`;
-        }, true),
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '68%',
+      layout: { padding: { top: 8, bottom: 8 } },
+      plugins: {
+        legend: {
+          position: 'right',
+          labels: {
+            color:         isDark ? '#94a3b8' : '#475569',
+            font:          { family:'Inter', size:11 },
+            padding:       10,
+            boxWidth:      10,
+            usePointStyle: true,
+            // Truncar etiquetas largas
+            generateLabels: chart => {
+              const ds = chart.data.datasets[0];
+              return chart.data.labels.map((lbl, i) => ({
+                text:        lbl.length > 18 ? lbl.slice(0,16)+'…' : lbl,
+                fillStyle:   ds.backgroundColor[i],
+                strokeStyle: ds.borderColor,
+                lineWidth:   ds.borderWidth,
+                hidden:      false,
+                index:       i,
+              }));
+            },
+          },
+        },
+        tooltip: {
+          backgroundColor: isDark?'#1e293b':'#fff',
+          titleColor:      isDark?'#f1f5f9':'#0f172a',
+          bodyColor:       isDark?'#94a3b8':'#475569',
+          borderColor:     isDark?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.1)',
+          borderWidth:1, padding:12, cornerRadius:10,
+          callbacks: {
+            label: ctx => {
+              const v   = ctx.dataset.data[ctx.dataIndex];
+              const pct = total > 0 ? (v / total * 100).toFixed(1) : '0';
+              return ` ${ctx.label}: ${formatMoney(v)} (${pct}%)`;
+            },
+          },
+        },
       },
     },
   });
@@ -532,7 +571,7 @@ function renderTipoBar(rows, canvasId, color, badgeId) {
       responsive:true, maintainAspectRatio:false,
       plugins:{
         legend:{display:false},
-        tooltip: tooltipDefaults(isDark, v => formatMoney(v), false, true),
+        tooltip: tooltipDefaults(isDark, v => formatMoney(v)),
       },
       scales:{
         x:{grid:{color:grid}, border:{display:false},
@@ -616,7 +655,7 @@ function buildYearFilter(rows) {
     opt.value = y; opt.textContent = y;
     sel.appendChild(opt);
   }
-  sel.value = String(detectedYear);
+  sel.value = 'all';  // mostrar todo por defecto
   sel.onchange = () => applyYearFilter(sel.value);
 }
 
@@ -830,7 +869,7 @@ function escHtml(s) {
 }
 
 // Opciones base para tooltips de Chart.js
-// horizontal=true para barras horizontales (indexAxis:'y') → el valor está en ctx.parsed.x
+// horizontal=true para barras horizontales (indexAxis:'y')
 function tooltipDefaults(isDark, labelFn, isDonut=false, horizontal=false) {
   return {
     backgroundColor: isDark?'#1e293b':'#fff',
@@ -841,9 +880,8 @@ function tooltipDefaults(isDark, labelFn, isDonut=false, horizontal=false) {
     callbacks: {
       label: isDonut
         ? ctx => labelFn(ctx.parsed, ctx)
-        : horizontal
-          ? ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.parsed.x)}`
-          : ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.parsed.y ?? ctx.parsed)}`,
+        // Acceso directo al array de datos — más confiable que ctx.parsed en ambos ejes
+        : ctx => ` ${ctx.dataset.label||''}: ${labelFn(ctx.dataset.data[ctx.dataIndex])}`,
     },
   };
 }
