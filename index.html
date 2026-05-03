@@ -340,23 +340,26 @@
       <!-- ── TABLA DETALLE TRANSACCIONES ── -->
       <div class="table-card">
         <div class="table-header">
-          <h3 class="chart-title">Últimas Transacciones</h3>
+          <h3 class="chart-title">Detalle de Transacciones</h3>
           <span class="table-badge" id="txBadge">0 registros</span>
         </div>
-        <div class="table-wrapper">
-          <table class="data-table" id="txTable">
+        <div class="table-wrapper tx-table-wrapper">
+          <table class="data-table tx-enhanced-table" id="txTable">
             <thead>
-              <tr>
-                <th>Fecha</th>
-                <th>Movimiento</th>
-                <th>Tipo</th>
-                <th>Proveedor / Cliente</th>
-                <th class="text-right">Monto</th>
-              </tr>
+              <tr><!-- Generado por JS (buildTxHeader) --></tr>
             </thead>
             <tbody id="txTableBody">
               <!-- Generado por JS -->
             </tbody>
+            <tfoot>
+              <tr class="tx-totals-row">
+                <td colspan="4" id="footCount" class="tx-foot-label">Totales</td>
+                <td class="text-right tx-foot-num" id="footImporte">—</td>
+                <td class="text-right tx-foot-num" id="footIva">—</td>
+                <td class="text-right tx-foot-num" id="footRet">—</td>
+                <td class="text-right tx-foot-num tx-foot-total" id="footTotal">—</td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>
